@@ -46,7 +46,6 @@ def move_files_to_history(files):
 def watch_dialogue_directory():
     while True:
         files = sorted(glob.glob(os.path.join(DIALOGUE_DIR, "*.txt")), key=os.path.getmtime)
-        print(f"files: {files}")
         prompts = [f for f in files if "prompt" in f]
         responses = [f for f in files if "response" in f]
         # This should queue off of responses, as there is a lag between prompts and responses
