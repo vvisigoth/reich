@@ -19,13 +19,17 @@ def extract_digits_from_filename(filename):
         return match.group(1)
     return None
 
-def send_summary_request_to_openai(text):
+def send_summary_request_to_openai(text, recent_summary):
+    messages = [
+        {"role": "system", "content": "You are making a concise summary of a conversation between a user an an AI code assistant. 500 words max."},
+        {"role": "assistant", "content": recent_summary},
+        {"role": "user", "content": f"Summarize the following exchange: {text}"}
+    ]
+    print(f"RECENT SUMMARY: {recent_summary}")
+
     response = client.chat.completions.create(
-        model="gpt-4", 
-        messages=[
-            {"role": "system", "content": "You are making a concise summary of a conversation between a user an an AI code assistant. 500 words max."},
-            {"role": "user", "content": f"Summarize the following exchange: {text}"}
-          ],
+        model="gpt-4",
+        messages=messages,
         max_tokens=1500,
         temperature=0.7
     )
@@ -48,6 +52,13 @@ def watch_dialogue_directory():
         files = sorted(glob.glob(os.path.join(DIALOGUE_DIR, "*.txt")), key=os.path.getmtime)
         prompts = [f for f in files if "prompt" in f]
         responses = [f for f in files if "response" in f]
+        summaries = [f for f in files if "summary" in f]
+
+        recent_summary = ""
+        if summaries:
+            with open(summaries[-1], 'r') as f:
+                recent_summary = f.read().strip()
+
         # This should queue off of responses, as there is a lag between prompts and responses
         if len(responses) > 5:
             text = ""
@@ -63,7 +74,7 @@ def watch_dialogue_directory():
                         text += "\nAI: " + f.read()
                 except:
                     text += "\nAI: <no response>"
-            summary = send_summary_request_to_openai(text)
+            summary = send_summary_request_to_openai(text, recent_summary)
             save_summary(summary)
             # Move processed files to history directory
             move_files_to_history(prompts[:5])
