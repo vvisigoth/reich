@@ -1,5 +1,6 @@
 import os
 import time
+import argparse
 from openai import OpenAI
 import glob
 from pathlib import Path
@@ -23,16 +24,13 @@ def save_prompt(prompt_text):
     return epoch_time, prompt_file
 
 def load_preamble():
-    if os.path.exists(PREAMBLE_FILE):
-        with open(PREAMBLE_FILE, 'r') as f:
-            return f.read().strip()
-    return ""
+    with open(PREAMBLE_FILE, 'r') as f:
+        return f.read().strip()
 
 def load_exclusions():
     if os.path.exists(EXCLUDE_FILE):
         with open(EXCLUDE_FILE, 'r') as f:
-            patterns = [line.strip() for line in f if line.strip()]
-        return patterns
+            return [line.strip() for line in f if line.strip()]
     return []
 
 def gather_context(exclusions):
@@ -66,7 +64,7 @@ def gather_message_history():
     if summaries:
         with open(summaries[-1], 'r') as f:
             message_history.append({"role": "assistant", "content": f.read().strip()})
-
+    
     for p, r in zip(prompts, responses):
         with open(p, 'r') as f:
             message_history.append({"role": "user", "content": f.read().strip()})
@@ -79,7 +77,7 @@ def send_prompt_to_openai(prompt):
     message_history = gather_message_history()
     message_history.append({"role": "user", "content": prompt})
     response = client.chat.completions.create(
-        model="gpt-4",
+        model="gpt-4", 
         messages=message_history,
         max_tokens=1500,
         temperature=0.7
@@ -96,28 +94,22 @@ def extract_code_blocks(text):
     code_blocks = re.findall(r'```(.*?)```', text, re.DOTALL)
     return code_blocks
 
-def identify_language(code_block):
-    if code_block.startswith('python'):
-        return '.py'
-    elif code_block.startswith('javascript'):
-        return '.js'
-    elif code_block.startswith('java'):
-        return '.java'
-    # Add more language detections as required
-    return '.txt'  # Default extension
-
 def save_code_blocks(code_blocks):
     Path(GENERATED_DIR).mkdir(exist_ok=True)
     for i, code_block in enumerate(code_blocks):
         code_block = code_block.strip()
-        extension = identify_language(code_block)
-        filename = f"{get_epoch_time()}_{i}{extension}"
-        filepath = os.path.join(GENERATED_DIR, filename)
-        with open(filepath, 'w') as file:
-            # Skip the first line if it's just the language declaration
-            lines = code_block.split('\n')
-            if len(lines) > 1 and lines[0] in ['python', 'javascript', 'java']:
-                file.write('\n'.join(lines[1:]))
+        if code_block.startswith('python'):
+            extension = '.py'
+        elif code_block.startswith('javascript'):
+            extension = '.js'
+        elif code_block.startswith('java'):
+            extension = '.java'
+        else:
+            extension = '.txt'
+        filename = os.path.join(GENERATED_DIR, f"{get_epoch_time()}_{i}{extension}")
+        with open(filename, 'w') as file:
+            if extension in ['.py', '.js', '.java']:
+                file.write(code_block.split('\n', 1)[1])
             else:
                 file.write(code_block)
 
@@ -132,7 +124,16 @@ def main():
     Path(DIALOGUE_DIR).mkdir(exist_ok=True)
     while True:
         print_history()
-        user_prompt = input("\nEnter your prompt: ")
+        parser = argparse.ArgumentParser()
+        parser.add_argument('-f', '--file', help='File path to read prompt from')
+        args = parser.parse_args()
+
+        if args.file:
+            with open(os.path.expanduser(args.file), 'r') as file:
+                user_prompt = file.read()
+        else:
+            user_prompt = input("\nEnter your prompt: ")
+
         epoch_time, prompt_file = save_prompt(user_prompt)
         preamble = load_preamble()
         exclusions = load_exclusions()
