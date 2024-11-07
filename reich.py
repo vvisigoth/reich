@@ -55,13 +55,32 @@ def gather_context(exclusions):
             context += f.read()
     return context
 
+def gather_message_history():
+    files = sorted(glob.glob(os.path.join(DIALOGUE_DIR, "*.txt")), key=os.path.getmtime)
+    summaries = [f for f in files if "summary" in f]
+    prompts = [f for f in files if "prompt" in f]
+    responses = [f for f in files if "response" in f]
+
+    message_history = []
+
+    if summaries:
+        with open(summaries[-1], 'r') as f:
+            message_history.append({"role": "assistant", "content": f.read().strip()})
+
+    for p, r in zip(prompts, responses):
+        with open(p, 'r') as f:
+            message_history.append({"role": "user", "content": f.read().strip()})
+        with open(r, 'r') as f:
+            message_history.append({"role": "assistant", "content": f.read().strip()})
+
+    return message_history
+
 def send_prompt_to_openai(prompt):
+    message_history = gather_message_history()
+    message_history.append({"role": "user", "content": prompt})
     response = client.chat.completions.create(
-        model="gpt-4", 
-        messages=[
-            {"role": "system", "content": "You are an AI code assistant."},
-            {"role": "user", "content": prompt}
-          ],
+        model="gpt-4",
+        messages=message_history,
         max_tokens=1500,
         temperature=0.7
     )
