@@ -1,6 +1,7 @@
-# USe
+# TODO
 
-- Make sure there is an OpenAI api key in file named 'key'
-- this assumes that you've run
-- `python -m venv ..`
-- `pip install requirements.txt`
+- "Chain" the summaries together instead of just being checkpoints, the previous summary has to be in there
+- Git integration
+- Regression tests
+- Unit tests
+
