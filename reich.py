@@ -2,8 +2,10 @@ import os
 import time
 import argparse
 from openai import OpenAI
+import base64
 import glob
 from pathlib import Path
+from mimetypes import guess_type
 import re
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -15,6 +17,15 @@ GENERATED_DIR = "generated/"
 
 def get_epoch_time():
     return str(int(time.time()))
+
+def encode_image(image_path):
+    mime_type, _ = guess_type(image_path)
+    if mime_type is None:
+        mime_type = 'application/octet-stream'
+
+    with open(image_path, "rb") as image_file:
+        base64_encoded_data = base64.b64encode(image_file.read()).decode('utf-8')
+    return f"data:{mime_type};base64,{base64_encoded_data}"
 
 def save_prompt(prompt_text):
     epoch_time = get_epoch_time()
@@ -64,7 +75,7 @@ def gather_message_history():
     if summaries:
         with open(summaries[-1], 'r') as f:
             message_history.append({"role": "assistant", "content": f.read().strip()})
-    
+
     for p, r in zip(prompts, responses):
         with open(p, 'r') as f:
             message_history.append({"role": "user", "content": f.read().strip()})
@@ -73,11 +84,28 @@ def gather_message_history():
 
     return message_history
 
-def send_prompt_to_openai(prompt):
+def send_prompt_to_openai(prompt, encoded_image):
     message_history = gather_message_history()
-    message_history.append({"role": "user", "content": prompt})
+    if encoded_image:
+        message_history.append(
+            {"role": "user", "content":
+                [
+                    {
+                        "type": "text",
+                        "text": prompt
+                    },
+                    {
+                        "type": "image_url", "image_url":
+                            {
+                                "url": encoded_image
+                            }
+                    }
+                ]
+            })
+    else:
+        message_history.append({"role": "user", "content": prompt})
     response = client.chat.completions.create(
-        model="gpt-4", 
+        model="gpt-4o",
         messages=message_history,
         max_tokens=1500,
         temperature=0.7
@@ -126,11 +154,15 @@ def main():
         print_history()
         parser = argparse.ArgumentParser()
         parser.add_argument('-f', '--file', help='File path to read prompt from')
+        parser.add_argument("-i", "--image", required=False, help="Image file to send along with the prompt.")
         args = parser.parse_args()
+        encoded_image = None
 
         if args.file:
             with open(os.path.expanduser(args.file), 'r') as file:
                 user_prompt = file.read()
+            if args.image:
+                encoded_image = encode_image(args.image)
         else:
             user_prompt = input("\nEnter your prompt: ")
 
@@ -139,7 +171,7 @@ def main():
         exclusions = load_exclusions()
         context = gather_context(exclusions)
         final_prompt = f"{preamble}\n\n{user_prompt}\n\n{context}"
-        response = send_prompt_to_openai(final_prompt)
+        response = send_prompt_to_openai(final_prompt, encoded_image)
         response_file = save_response(epoch_time, response)
 
         # Extract code blocks and save them
