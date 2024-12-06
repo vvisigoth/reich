@@ -1,7 +1,8 @@
 # TODO
 
-- "Chain" the summaries together instead of just being checkpoints, the previous summary has to be in there
 - Git integration
+- Summarize code to make searching easier
 - Regression tests
 - Unit tests
+- Precheck tokens
 
