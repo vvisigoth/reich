@@ -47,44 +47,41 @@ def move_files_to_history(files):
     for f in files:
         shutil.move(f, HISTORY_DIR)
 
-def watch_dialogue_directory():
-    while True:
-        files = sorted(glob.glob(os.path.join(DIALOGUE_DIR, "*.txt")), key=os.path.getmtime)
-        prompts = [f for f in files if "prompt" in f]
-        responses = [f for f in files if "response" in f]
-        summaries = [f for f in files if "summary" in f]
+def summarize_conversation():
+    files = sorted(glob.glob(os.path.join(DIALOGUE_DIR, "*.txt")), key=os.path.getmtime)
+    prompts = [f for f in files if "prompt" in f]
+    responses = [f for f in files if "response" in f]
+    summaries = [f for f in files if "summary" in f]
 
-        recent_summary = ""
-        if summaries:
-            with open(summaries[-1], 'r') as f:
-                recent_summary = f.read().strip()
+    recent_summary = ""
+    if summaries:
+        with open(summaries[-1], 'r') as f:
+            recent_summary = f.read().strip()
 
-        # This should queue off of responses, as there is a lag between prompts and responses
-        if len(responses) > 5:
-            text = ""
-            for i in range(len(responses)):
-                key = extract_digits_from_filename(prompts[i])
-                p = prompts[i]
-                print(f"prompts: {p}")
-                print(f"key {key}")
-                with open(prompts[i], 'r') as f:
-                    text += "\nUser: " + f.read()
-                try:
-                    with open(f"dialogue/{key}-response.txt", 'r') as f:
-                        text += "\nAI: " + f.read()
-                except:
-                    text += "\nAI: <no response>"
-            summary = send_summary_request_to_openai(text, recent_summary)
-            save_summary(summary)
-            # Move processed files to history directory
-            move_files_to_history(prompts[:5])
-            move_files_to_history(responses[:5])
-        else:
-            time.sleep(1)
+    # This should queue off of responses, as there is a lag between prompts and responses
+    if len(responses) > 5:
+        text = ""
+        for i in range(len(responses)):
+            key = extract_digits_from_filename(prompts[i])
+            p = prompts[i]
+            print(f"prompts: {p}")
+            print(f"key {key}")
+            with open(prompts[i], 'r') as f:
+                text += "\nUser: " + f.read()
+            try:
+                with open(f"dialogue/{key}-response.txt", 'r') as f:
+                    text += "\nAI: " + f.read()
+            except:
+                text += "\nAI: <no response>"
+        summary = send_summary_request_to_openai(text, recent_summary)
+        save_summary(summary)
+        # Move processed files to history directory
+        move_files_to_history(prompts[:5])
+        move_files_to_history(responses[:5])
 
 def main():
     Path(DIALOGUE_DIR).mkdir(exist_ok=True)
-    watch_dialogue_directory()
+    summarize_conversation()
 
 if __name__ == "__main__":
     main()

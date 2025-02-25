@@ -8,6 +8,5 @@ history
 generated
 README.md
 exclude.txt
-reich.py
 TODO.md
 __pycache__

@@ -8,6 +8,8 @@ from mimetypes import guess_type
 import re
 import glob
 
+import diarize
+
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 DIALOGUE_DIR = "dialogue/"
@@ -217,6 +219,12 @@ def main():
         # Extract code blocks and save them
         code_blocks = extract_code_blocks(response)
         save_code_blocks(code_blocks)
+
+        # Call the summarization function after processing
+        diarize.summarize_conversation()
+
+        # Optional: Add a delay to control loop timing
+        time.sleep(1)
 
 if __name__ == "__main__":
     main()
