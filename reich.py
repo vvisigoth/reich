@@ -37,11 +37,9 @@ def save_prompt(prompt_text, full_context):
     try:
         with open(prompt_file, 'w') as f:
             f.write(prompt_text)
-        print(f"Prompt saved to {prompt_file}")
 
         with open(context_file, 'w') as f:
             f.write(full_context)
-        print(f"Context saved to {context_file}")
 
     except Exception as e:
         print(f"Error saving files: {e}")
@@ -81,7 +79,6 @@ def gather_context(exclusions):
     # Generate the directory structure
     dir_structure = generate_directory_structure('.', EXCLUDE_FILE)
     context = f"Directory Structure:\n{dir_structure}"
-    print("context", context)
     
     all_files = [f for f in glob.glob("**/*", recursive=True) if os.path.isfile(f)]
     exclude_files = []
