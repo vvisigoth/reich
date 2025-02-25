@@ -1,12 +1,12 @@
 import os
 import time
 import argparse
+import subprocess
 from openai import OpenAI
-import base64
-import glob
 from pathlib import Path
 from mimetypes import guess_type
 import re
+import glob
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
@@ -27,12 +27,24 @@ def encode_image(image_path):
         base64_encoded_data = base64.b64encode(image_file.read()).decode('utf-8')
     return f"data:{mime_type};base64,{base64_encoded_data}"
 
-def save_prompt(prompt_text):
+def save_prompt(prompt_text, full_context):
     epoch_time = get_epoch_time()
     prompt_file = os.path.join(DIALOGUE_DIR, f"{epoch_time}-prompt.txt")
-    with open(prompt_file, 'w') as f:
-        f.write(prompt_text)
-    return epoch_time, prompt_file
+    context_file = os.path.join(DIALOGUE_DIR, f"{epoch_time}-context.txt")
+    
+    try:
+        with open(prompt_file, 'w') as f:
+            f.write(prompt_text)
+        print(f"Prompt saved to {prompt_file}")
+
+        with open(context_file, 'w') as f:
+            f.write(full_context)
+        print(f"Context saved to {context_file}")
+
+    except Exception as e:
+        print(f"Error saving files: {e}")
+    
+    return epoch_time, prompt_file, context_file
 
 def load_preamble():
     with open(PREAMBLE_FILE, 'r') as f:
@@ -44,8 +56,31 @@ def load_exclusions():
             return [line.strip() for line in f if line.strip()]
     return []
 
+def generate_directory_structure(root_dir, exclude_file):
+    exclude_list = []
+    if os.path.exists(exclude_file):
+        with open(exclude_file, 'r') as f:
+            exclude_list = [line.strip() for line in f.readlines()]
+
+    # Construct the tree command with excludes
+    exclude_params = []
+    for item in exclude_list:
+        exclude_params.append(f"-I '{item}'")
+
+    exclude_str = ' '.join(exclude_params)
+    command = f"tree {root_dir} {exclude_str} --prune"
+    
+    # Execute the tree command
+    result = subprocess.run(command, shell=True, capture_output=True, text=True)
+    
+    return result.stdout
+
 def gather_context(exclusions):
-    context = ""
+    # Generate the directory structure
+    dir_structure = generate_directory_structure('.', EXCLUDE_FILE)
+    context = f"Directory Structure:\n{dir_structure}"
+    print("context", context)
+    
     all_files = [f for f in glob.glob("**/*", recursive=True) if os.path.isfile(f)]
     exclude_files = []
     exclude_dirs = []
@@ -54,6 +89,8 @@ def gather_context(exclusions):
             exclude_files.append(pattern)
         else:
             exclude_dirs.append(pattern)
+
+    # Append contents of files to the context, considering exclusions
     for file in all_files:
         if any(file.startswith(excluded_dir) for excluded_dir in exclude_dirs):
             continue
@@ -166,11 +203,14 @@ def main():
         else:
             user_prompt = input("\nEnter your prompt: ")
 
-        epoch_time, prompt_file = save_prompt(user_prompt)
         preamble = load_preamble()
         exclusions = load_exclusions()
         context = gather_context(exclusions)
+        print("Generated Context:", context)  # Debugging: Output the context
+
         final_prompt = f"{preamble}\n\n{user_prompt}\n\n{context}"
+        epoch_time, prompt_file, context_file = save_prompt(user_prompt, final_prompt)
+        
         response = send_prompt_to_openai(final_prompt, encoded_image)
         response_file = save_response(epoch_time, response)
 
