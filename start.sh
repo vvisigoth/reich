@@ -4,7 +4,6 @@ SESSION_NAME=$(basename "$PWD")
 #SESSION_NAME=tester
 
 SCRIPT1=reich.py
-SCRIPT2=summarize.py
 
 # Start a new tmux session named $SESSION_NAME
 tmux new-session -d -s $SESSION_NAME
@@ -21,7 +20,7 @@ tmux split-window -h -t $SESSION_NAME:0
 tmux split-window -v -t $SESSION_NAME:0.1 -p 10
 
 # Set up logging for pane 0.1 with a max of 1000 lines
-tmux pipe-pane -t $SESSION_NAME:0.1 -o 'tee -a pane_01_log.txt | tail -n 1000 > pane_01_log.tmp && mv pane_01_log.tmp pane_01_log.txt'
+tmux pipe-pane -t ${SESSION_NAME}:0.1 -o "tee -a ${SESSION_NAME}_terminal_log.txt | tail -n 1000 > ${SESSION_NAME}_terminal_log.tmp && mv ${SESSION_NAME}_terminal_log.tmp ${SESSION_NAME}_terminal_log.txt"
 
 # Create a second window and run the second script
 tmux new-window -t $SESSION_NAME:1 -n 'Vim'
