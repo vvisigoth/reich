@@ -104,6 +104,74 @@ python reich.py -f path/to/prompt.txt -i path/to/image.jpg
 5. Any code blocks in the response are extracted and saved to the `generated` directory
 6. The conversation is summarized for future context
 
+## Search.py - Semantic Search for Your Dialogue History
+
+The `search.py` script provides a powerful way to search through your past conversations with AI models. It uses Retrieval Augmented Generation (RAG) principles with vector embeddings to find semantically relevant content rather than just exact keyword matches.
+
+### Key Features
+
+- **Semantic search**: Find content based on meaning, not just keywords
+- **Multiple embedding options**: Uses OpenAI embeddings when available, with fallback to local HuggingFace embeddings
+- **Automatic indexing**: Creates and maintains a searchable index of your dialogue history
+- **Smart file change detection**: Automatically rebuilds the index when new conversation files are detected
+
+### Usage
+
+```bash
+# Basic search
+python search.py "your search query"
+
+# Search with more results
+python search.py "your search query" --results 10
+
+# Force rebuilding the search index
+python search.py "your search query" --rebuild
+
+# Search in a different directory
+python search.py "your search query" --dir custom_dialogue_dir
+```
+
+### Requirements
+
+The script requires the following Python packages:
+- `langchain_community`
+- `langchain`
+- `faiss-cpu` (for the vector database)
+
+If you have an OpenAI API key in your config.json, it will use OpenAI's embeddings. Otherwise, it falls back to a local HuggingFace model (`all-MiniLM-L6-v2`).
+
+### Index Management
+
+The search index is stored in the `history_index` directory. The script automatically manages this index:
+
+- Creates a new index if none exists
+- Uses the existing index for faster searches
+- Automatically detects when documents have been added or modified and rebuilds as needed
+- Can be forced to rebuild with the `--rebuild` flag
+
+### Examples
+
+Find conversations about Python code:
+```bash
+python search.py "python function examples"
+```
+
+Search for discussions about specific concepts:
+```bash
+python search.py "API authentication methods"
+```
+
+Look up past configuration questions:
+```bash
+python search.py "how to configure API keys"
+```
+
+## TODO
+- Programmatically reindex
+- Restructure in client/server so that each directory can run its own client
+- Structured output to avoid code block parsing
+- Return patches instead of code text to avoid
+
 ## License
 
 [TBD]
