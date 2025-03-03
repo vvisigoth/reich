@@ -167,10 +167,19 @@ python search.py "how to configure API keys"
 ```
 
 ## TODO
-- Programmatically reindex
-- Restructure in client/server so that each directory can run its own client
-- Structured output to avoid code block parsing
 - Return patches instead of code text to avoid
+- Programmatically reindex
+- Structured output to avoid code block parsing
+    ```
+    {
+        "explanation": "",
+        "patches": [
+            "",
+            ""
+        ]
+    }
+    ```
+- helper scripts/executables
 
 ## License
 
