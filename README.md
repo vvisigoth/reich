@@ -169,6 +169,7 @@ python search.py "how to configure API keys"
 ## TODO
 - Return patches instead of code text to avoid
 - Programmatically reindex
+- Install script to init project `curl sSL https://url.com/script | bash`
 - Structured output to avoid code block parsing
     ```
     {
