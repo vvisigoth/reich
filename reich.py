@@ -226,6 +226,7 @@ def extract_code_blocks(text):
 
 def save_code_blocks(code_blocks):
     Path(GENERATED_DIR).mkdir(exist_ok=True)
+    print("code_blocks", code_blocks)
     for i, code_block in enumerate(code_blocks):
         code_block = code_block.strip()
         if code_block.startswith('python'):
@@ -278,8 +279,9 @@ def main():
     response_file = save_response(epoch_time, response)
 
     # Extract code blocks and save them
-    code_blocks = extract_code_blocks(response)
-    save_code_blocks(code_blocks)
+    # commenting this out because I never use
+    # code_blocks = extract_code_blocks(response)
+    # save_code_blocks(code_blocks)
 
     # Call the summarization function after processing
     diarize.summarize_conversation()
