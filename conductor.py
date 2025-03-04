@@ -1,6 +1,8 @@
 import os
 import time
 import argparse
+from PIL import Image
+import io
 import requests
 import json
 import sys
@@ -32,6 +34,28 @@ def encode_image(image_path):
     with open(image_path, "rb") as image_file:
         base64_encoded_data = base64.b64encode(image_file.read()).decode('utf-8')
     return f"data:{mime_type};base64,{base64_encoded_data}"
+
+def process_image(image_path, max_height=7999):
+    with Image.open(image_path) as img:
+        width, height = img.size
+        
+        # Check if image needs to be split
+        if height > width * 4/3 and height > max_height:
+            pieces = []
+            for i in range(0, height, max_height):
+                box = (0, i, width, min(i+max_height, height))
+                piece = img.crop(box)
+                
+                # Convert piece to base64
+                buffer = io.BytesIO()
+                piece.save(buffer, format="PNG")
+                encoded_piece = base64.b64encode(buffer.getvalue()).decode('utf-8')
+                pieces.append(f"data:image/png;base64,{encoded_piece}")
+            
+            return pieces
+        else:
+            # If image doesn't need splitting, return it as is
+            return [encode_image(image_path)]
 
 def save_prompt(prompt_text, final_context):
     epoch_time = get_epoch_time()
@@ -124,52 +148,43 @@ def gather_message_history():
 
     return message_history
 
-def send_request_to_server(prompt, encoded_image=None, server_url=SERVER_URL, provider="auto"):
-    """Send request to the AI server"""
-    # Gather message history
+def send_request_to_server(prompt, image_paths=None, server_url=SERVER_URL, provider="auto"):
     message_history = gather_message_history()
     
-    # Add current prompt to message history
-    if encoded_image:
-        if provider == "anthropic":
-            # Format for Anthropic API
-            message_history.append({
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": guess_image_mime_type(encoded_image),
-                            "data": encoded_image.split(",", 1)[1]  # Remove the "data:image/jpeg;base64," prefix
-                        }
-                    },
-                    {
-                        "type": "text",
-                        "text": prompt
-                    }
-                ]
-            })
-        else:
-            # Format for OpenAI API (default)
-            message_history.append({
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": prompt
-                    },
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": encoded_image
-                        }
-                    }
-                ]
-            })
-    else:
-        message_history.append({"role": "user", "content": prompt})
+    if image_paths:
+        for image_path in image_paths:
+            image_pieces = process_image(image_path)
+            for piece in image_pieces:
+                if provider == "anthropic":
+                    message_history.append({
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": "image/png",
+                                    "data": piece.split(",", 1)[1]
+                                }
+                            }
+                        ]
+                    })
+                else:
+                    message_history.append({
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": piece
+                                }
+                            }
+                        ]
+                    })
     
+    # Add the text prompt last
+    message_history.append({"role": "user", "content": prompt})
+
     # Prepare request data
     request_data = {
         "messages": message_history,
@@ -226,7 +241,7 @@ def main():
     # Parse command line arguments
     parser = argparse.ArgumentParser(description="Reich client for AI text generation")
     parser.add_argument('-f', '--file', help='File path to read prompt from')
-    parser.add_argument("-i", "--image", required=False, help="Image file to send along with the prompt")
+    parser.add_argument("-i", "--images", nargs='+', required=False, help="Image files to send along with the prompt")
     parser.add_argument("-s", "--server", default=SERVER_URL, help=f"Server URL (default: {SERVER_URL})")
     parser.add_argument("-p", "--provider", default="auto", choices=["auto", "openai", "anthropic"], 
                         help="AI provider to use (default: auto)")
@@ -241,8 +256,8 @@ def main():
         user_prompt = input("\nEnter your prompt: ")
     
     # Process image if provided
-    if args.image:
-        encoded_image = encode_image(args.image)
+    #if args.image:
+    #    encoded_image = encode_image(args.image)
     
     # Load context
     preamble = load_preamble() if os.path.exists(PREAMBLE_FILE) else ""
@@ -252,12 +267,15 @@ def main():
     # Prepare final prompt with context
     final_prompt = f"{preamble}\n\n{user_prompt}\n\n{context}"
     epoch_time, prompt_file, context_file = save_prompt(user_prompt, final_context=final_prompt)
+
+    image_paths = args.images if args.images else None
+
     
     try:
         # Send request to AI server
         response_text = send_request_to_server(
             prompt=final_prompt, 
-            encoded_image=encoded_image,
+            image_paths=image_paths,
             server_url=args.server,
             provider=args.provider
         )
