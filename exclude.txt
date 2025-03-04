@@ -5,6 +5,9 @@ requirements.txt
 start.sh
 dialogue
 history
+captures
+history_index
+config.json
 generated
 README.md
 exclude.txt
