@@ -8,7 +8,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.by import By
 from urllib.parse import urlparse
 
-def capture_webpage(url, output_type):
+def capture_webpage(url, output_type, output_file=None):
     # Set up headless Chrome
     chrome_options = Options()
     chrome_options.add_argument("--headless")
@@ -30,10 +30,13 @@ def capture_webpage(url, output_type):
         os.makedirs('captures', exist_ok=True)
 
         # Generate filename from URL
-        parsed_url = urlparse(url)
-        filename = parsed_url.netloc + parsed_url.path.replace('/', '_')
-        if not filename.strip():
-            filename = 'homepage'
+        if output_file:
+            filename = output_file
+        else:
+            parsed_url = urlparse(url)
+            filename = parsed_url.netloc + parsed_url.path.replace('/', '_')
+            if not filename.strip():
+                filename = 'homepage'
 
         if output_type == 'screenshot':
             # Get the total height of the page
@@ -62,10 +65,11 @@ def main():
     parser.add_argument("url", help="URL of the webpage to capture")
     parser.add_argument("--type", choices=['screenshot', 'content'], default='screenshot',
                         help="Type of capture: 'screenshot' or 'content' (default: screenshot)")
+    parser.add_argument("-o", "--output", help="Output file name")
     
     args = parser.parse_args()
-    
-    capture_webpage(args.url, args.type)
+    output_file = args.output
+    capture_webpage(args.url, args.type, output_file)
 
 if __name__ == "__main__":
     main()
