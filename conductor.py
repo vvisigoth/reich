@@ -131,18 +131,39 @@ def send_request_to_server(prompt, encoded_image=None, server_url=SERVER_URL, pr
     
     # Add current prompt to message history
     if encoded_image:
-        message_history.append(
-            {"role": "user", "content": 
-                [
+        if provider == "anthropic":
+            # Format for Anthropic API
+            message_history.append({
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": guess_image_mime_type(encoded_image),
+                            "data": encoded_image.split(",", 1)[1]  # Remove the "data:image/jpeg;base64," prefix
+                        }
+                    },
+                    {
+                        "type": "text",
+                        "text": prompt
+                    }
+                ]
+            })
+        else:
+            # Format for OpenAI API (default)
+            message_history.append({
+                "role": "user",
+                "content": [
                     {
                         "type": "text",
                         "text": prompt
                     },
                     {
-                        "type": "image_url", "image_url":
-                            {
-                                "url": encoded_image
-                            }
+                        "type": "image_url",
+                        "image_url": {
+                            "url": encoded_image
+                        }
                     }
                 ]
             })
@@ -184,6 +205,19 @@ def send_request_to_server(prompt, encoded_image=None, server_url=SERVER_URL, pr
             
     except requests.exceptions.RequestException as e:
         raise Exception(f"Connection error: {str(e)}")
+
+def guess_image_mime_type(encoded_image):
+    """Guess the MIME type of the image from the data URL"""
+    if encoded_image.startswith("data:image/jpeg"):
+        return "image/jpeg"
+    elif encoded_image.startswith("data:image/png"):
+        return "image/png"
+    elif encoded_image.startswith("data:image/gif"):
+        return "image/gif"
+    elif encoded_image.startswith("data:image/webp"):
+        return "image/webp"
+    else:
+        return "application/octet-stream"  # Default to binary data if unknown
     
 def main():
     """Main function to run the Reich client."""
