@@ -282,13 +282,11 @@ def main():
             model=args.model
         )
         
-        # Save the response
-        response_file = os.path.join(DIALOGUE_DIR, f"{epoch_time}-response.txt")
-        with open(response_file, 'w') as f:
-            f.write(response_text)
+        # Parse and save response components (JSON format if available)
+        response_file, processed_response = save_response_components(epoch_time, response_text)
         
         # Extract and save code blocks if present
-        code_blocks = re.findall(r'```(.*?)```', response_text, re.DOTALL)
+        code_blocks = re.findall(r'```(.*?)```', processed_response, re.DOTALL)
         if code_blocks:
             Path(GENERATED_DIR).mkdir(exist_ok=True)
             for i, code_block in enumerate(code_blocks):
@@ -311,7 +309,24 @@ def main():
         print("\n" + "="*50)
         print("RESPONSE:")
         print("="*50)
-        print(response_text)
+        print(processed_response)
+        
+        # Print information about any patches or commands
+        is_json, text, patch, commands = parse_json_response(response_text)
+        if is_json:
+            if patch:
+                patch_file = os.path.join("patches", f"{epoch_time}-patch.txt")
+                print(f"\nPatch file saved to: {patch_file}")
+                print("To apply the patch, run:")
+                print(f"  git apply {patch_file}")
+            
+            if commands:
+                print("\nCommands generated:")
+                for i, cmd in enumerate(commands):
+                    cmd_file = os.path.join("commands", f"{epoch_time}-cmd{i+1}.sh")
+                    print(f"  [{i+1}] {cmd} (saved to {cmd_file})")
+                print("\nTo run a command, execute:")
+                print(f"  bash commands/{epoch_time}-cmd#.sh")
         
         # Update conversation summary
         if 'diarize' in sys.modules:
@@ -322,6 +337,3 @@ def main():
         return 1
         
     return 0
-
-if __name__ == "__main__":
-    sys.exit(main())
