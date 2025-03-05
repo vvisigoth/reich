@@ -150,6 +150,147 @@ def gather_message_history():
 
     return message_history
 
+def parse_json_response(response_text):
+    """
+    Parse a response text that may contain JSON formatted content.
+    
+    The expected format is:
+    ```json
+    {
+      "text": "Explanation in markdown format",
+      "patch": "Git-compatible unified diff format changes (optional)",
+      "commands": ["command1", "command2", ...]
+    }
+    ```
+    
+    Args:
+        response_text (str): The response text from the AI
+        
+    Returns:
+        tuple: (is_json, text, patch, commands)
+            - is_json: True if response contains valid JSON
+            - text: The explanation text
+            - patch: The patch content (or empty string)
+            - commands: List of commands (or empty list)
+    """
+    # Extract JSON content from response
+    json_match = re.search(r'```json\n(.*?)\n```', response_text, re.DOTALL)
+    
+    if json_match:
+        try:
+            # Parse the JSON content
+            json_content = json_match.group(1)
+            response_json = json.loads(json_content)
+            
+            # Extract components
+            text = response_json.get("text", "")
+            patch = response_json.get("patch", "")
+            commands = response_json.get("commands", [])
+            
+            return True, text, patch, commands
+            
+        except json.JSONDecodeError as e:
+            print(f"Error parsing JSON in response: {e}")
+    
+    # If no valid JSON found or parsing failed, return default values
+    return False, response_text, "", []
+
+def save_response_components(epoch_time, response_text):
+    """
+    Parse and save components from the JSON-formatted response.
+    
+    The response is expected to be in the format:
+    ```json
+    {
+      "text": "Explanation in markdown format",
+      "patch": "Git-compatible unified diff format changes (optional)",
+      "commands": ["command1", "command2", ...]
+    }
+    ```
+    
+    Args:
+        epoch_time (str): Timestamp for the response files
+        response_text (str): The full response text from the AI
+        
+    Returns:
+        tuple: (response_file, patch_file, commands_file) paths to the saved files
+    """
+    # Save the full response first
+    response_file = os.path.join(DIALOGUE_DIR, f"{epoch_time}-response.txt")
+    with open(response_file, 'w') as f:
+        f.write(response_text)
+    
+    # Create directories for components if they don't exist
+    Path(GENERATED_DIR).mkdir(exist_ok=True)
+    Path("patches").mkdir(exist_ok=True)
+    Path("commands").mkdir(exist_ok=True)
+    
+    # Extract the JSON part from the response
+    json_match = re.search(r'```json\n(.*?)\n```', response_text, re.DOTALL)
+    
+    if json_match:
+        try:
+            response_json = json.loads(json_match.group(1))
+            
+            # Process the text component (markdown explanation)
+            text_content = response_json.get("text", "")
+            text_file = os.path.join(GENERATED_DIR, f"{epoch_time}-explanation.md")
+            with open(text_file, 'w') as f:
+                f.write(text_content)
+            
+            # Process the patch component (if present)
+            patch_content = response_json.get("patch", "")
+            patch_file = None
+            if patch_content.strip():
+                patch_file = os.path.join("patches", f"{epoch_time}.patch")
+                # Normalize line endings to Unix style (LF)
+                patch_content = patch_content.replace('\r\n', '\n')
+                
+                # Ensure patch ends with exactly one newline
+                if not patch_content.endswith('\n'):
+                    patch_content += '\n'
+                elif patch_content.endswith('\n\n'):
+                    # Remove extra trailing newlines, leave just one
+                    patch_content = patch_content.rstrip('\n') + '\n'
+                
+                # Write in binary mode to avoid platform-specific line ending conversions
+                with open(patch_file, 'wb') as f:
+                    # Encode with UTF-8 and explicit Unix line endings
+                    f.write(patch_content.encode('utf-8'))
+                    # Ensure the file ends with a newline character
+                    if not patch_content.endswith('\n'):
+                        f.write('\n')
+            
+            # Process the commands component (if present)
+            commands = response_json.get("commands", [])
+            commands_file = None
+            if commands:
+                commands_file = os.path.join("commands", f"{epoch_time}.sh")
+                with open(commands_file, 'w') as f:
+                    f.write("#!/bin/bash\n\n")
+                    for cmd in commands:
+                        f.write(f"{cmd}\n")
+                # Make the commands file executable
+                os.chmod(commands_file, 0o755)
+            
+            print(f"Saved response components:")
+            print(f"- Full response: {response_file}")
+            print(f"- Explanation: {text_file}")
+            if patch_file:
+                print(f"- Patch file: {patch_file}")
+            if commands_file:
+                print(f"- Commands file: {commands_file}")
+                
+            return response_file, patch_file, commands_file
+            
+        except json.JSONDecodeError as e:
+            print(f"Error parsing JSON response: {e}")
+    else:
+        # Handle traditional format (no JSON structure)
+        print("No JSON format detected in response, saving as regular response")
+    
+    return response_file, None, None
+
 def send_request_to_server(prompt, image_paths=None, server_url=SERVER_URL, provider="openrouter", model="claude-3-7-sonnet-20250219"):
     message_history = gather_message_history()
 
@@ -264,7 +405,6 @@ def main():
     
     # Combine captured screenshots with provided images
     image_paths = (args.images or []) + captured_images
-    
     # Load context
     preamble = load_preamble() if os.path.exists(PREAMBLE_FILE) else ""
     exclusions = load_exclusions()
@@ -285,10 +425,10 @@ def main():
         )
         
         # Parse and save response components (JSON format if available)
-        response_file, processed_response = save_response_components(epoch_time, response_text)
+        response_file, patch_file, commands_file = save_response_components(epoch_time, response_text)
         
         # Extract and save code blocks if present
-        code_blocks = re.findall(r'```(.*?)```', processed_response, re.DOTALL)
+        code_blocks = re.findall(r'```(.*?)```', response_text, re.DOTALL)
         if code_blocks:
             Path(GENERATED_DIR).mkdir(exist_ok=True)
             for i, code_block in enumerate(code_blocks):
@@ -311,7 +451,7 @@ def main():
         print("\n" + "="*50)
         print("RESPONSE:")
         print("="*50)
-        print(processed_response)
+        print(response_text)
         
         # Print information about any patches or commands
         is_json, text, patch, commands = parse_json_response(response_text)

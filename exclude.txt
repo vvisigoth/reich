@@ -4,10 +4,15 @@ include
 requirements.txt
 start.sh
 dialogue
+patches
+commands
 history
 captures
 history_index
 config.json
+share
+preamble.txt
+system.txt
 generated
 README.md
 exclude.txt
