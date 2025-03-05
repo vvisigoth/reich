@@ -152,6 +152,8 @@ def gather_message_history():
 
 def send_request_to_server(prompt, image_paths=None, server_url=SERVER_URL, provider="openrouter", model="claude-3-7-sonnet-20250219"):
     message_history = gather_message_history()
+
+    print("message_history", message_history)
     
     if image_paths:
         for image_path in image_paths:
@@ -329,11 +331,14 @@ def main():
                 print(f"  bash commands/{epoch_time}-cmd#.sh")
         
         # Update conversation summary
-        if 'diarize' in sys.modules:
-            diarize.summarize_conversation()
+        #jif 'diarize' in sys.modules:
+        #j    diarize.summarize_conversation()
             
     except Exception as e:
         print(f"Error in processing: {e}")
         return 1
         
     return 0
+
+if __name__ == "__main__":
+    sys.exit(main())
