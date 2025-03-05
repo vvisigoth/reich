@@ -15,6 +15,8 @@ import subprocess
 
 # Import the diarize module from the current project
 import diarize
+# import utility to 
+from url_fetch import capture_webpage
 
 # Constants
 DIALOGUE_DIR = "dialogue/"
@@ -242,22 +244,28 @@ def main():
     parser = argparse.ArgumentParser(description="Reich client for AI text generation")
     parser.add_argument('-f', '--file', help='File path to read prompt from')
     parser.add_argument("-i", "--images", nargs='+', required=False, help="Image files to send along with the prompt")
+    parser.add_argument("-u", "--urls", nargs='+', required=False, help="URLs to capture screenshots from")
     parser.add_argument("-s", "--server", default=SERVER_URL, help=f"Server URL (default: {SERVER_URL})")
     parser.add_argument("-p", "--provider", default="auto", choices=["auto", "openai", "anthropic"], 
                         help="AI provider to use (default: auto)")
     args = parser.parse_args()
     
     # Process user input
-    encoded_image = None
     if args.file:
         with open(os.path.expanduser(args.file), 'r') as file:
             user_prompt = file.read()
     else:
         user_prompt = input("\nEnter your prompt: ")
     
-    # Process image if provided
-    #if args.image:
-    #    encoded_image = encode_image(args.image)
+    # Capture screenshots if URLs are provided
+    captured_images = []
+    if args.urls:
+        for url in args.urls:
+            screenshot_path = capture_webpage(url)
+            captured_images.append(screenshot_path)
+    
+    # Combine captured screenshots with provided images
+    image_paths = (args.images or []) + captured_images
     
     # Load context
     preamble = load_preamble() if os.path.exists(PREAMBLE_FILE) else ""
@@ -268,9 +276,6 @@ def main():
     final_prompt = f"{preamble}\n\n{user_prompt}\n\n{context}"
     epoch_time, prompt_file, context_file = save_prompt(user_prompt, final_context=final_prompt)
 
-    image_paths = args.images if args.images else None
-
-    
     try:
         # Send request to AI server
         response_text = send_request_to_server(
