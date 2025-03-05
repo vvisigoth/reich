@@ -17,16 +17,21 @@ def load_config():
 config = load_config()
 openai_api_key = config.get("openai_api_key")
 anthropic_api_key = config.get("anthropic_api_key")
+openrouter_api_key = config.get("openrouter_api_key")
 
 # Initialize Clients
 openai_client = None
 anthropic_client = None
+openrouter_client = None
 
 if openai_api_key:
     openai_client = OpenAI(api_key=openai_api_key)
 
 if anthropic_api_key:
     anthropic_client = Anthropic(api_key=anthropic_api_key)
+
+if openrouter_api_key:
+    openrouter_client = OpenAI(base_url="https://openrouter.ai/api/v1",api_key=openrouter_api_key)
 
 @app.route('/api/generate', methods=['POST'])
 def generate():
@@ -35,7 +40,7 @@ def generate():
     messages = data.get('messages', [])
     max_tokens = data.get('max_tokens', 1500)
     temperature = data.get('temperature', 0.7)
-    provider = data.get('provider', 'openai')  # Default to OpenAI if not specified
+    provider = data.get('provider', 'openrouter')  # Default to OpenAI if not specified
     
     try:
         if provider == 'openai' and openai_client:
@@ -73,6 +78,19 @@ def generate():
                 'model': model,
                 'provider': 'anthropic'
             })
+        elif provider == 'openrouter' and openrouter_client:
+            response = openrouter_client.chat.completions.create(
+                model=model,
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=temperature
+            )
+            return jsonify({
+                'success': True,
+                'content': response.choices[0].message.content.strip(),
+                'model': model,
+                'provider': 'openrouter'
+            })
         else:
             return jsonify({
                 'success': False,
@@ -92,6 +110,8 @@ def health_check():
         available_providers.append('openai')
     if anthropic_client:
         available_providers.append('anthropic')
+    if anthropic_client:
+        available_providers.append('openrouter')
         
     return jsonify({
         'status': 'ok',

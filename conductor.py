@@ -150,7 +150,7 @@ def gather_message_history():
 
     return message_history
 
-def send_request_to_server(prompt, image_paths=None, server_url=SERVER_URL, provider="auto"):
+def send_request_to_server(prompt, image_paths=None, server_url=SERVER_URL, provider="openrouter", model="claude-3-7-sonnet-20250219"):
     message_history = gather_message_history()
     
     if image_paths:
@@ -192,14 +192,9 @@ def send_request_to_server(prompt, image_paths=None, server_url=SERVER_URL, prov
         "messages": message_history,
         "max_tokens": 1500,
         "temperature": 0.7,
-        "provider": provider
+        "provider": provider,
+        "model": model
     }
-    
-    # Add model parameter based on provider
-    if provider == "anthropic":
-        request_data["model"] = "claude-3-5-sonnet-20240620"  # Use a supported model version
-    else:
-        request_data["model"] = "gpt-4o"
     
     # Send request to server
     try:
@@ -242,12 +237,13 @@ def main():
     
     # Parse command line arguments
     parser = argparse.ArgumentParser(description="Reich client for AI text generation")
-    parser.add_argument('-f', '--file', help='File path to read prompt from')
+    parser.add_argument('-f', '--file', default='prompt', help='File path to read prompt from')
     parser.add_argument("-i", "--images", nargs='+', required=False, help="Image files to send along with the prompt")
     parser.add_argument("-u", "--urls", nargs='+', required=False, help="URLs to capture screenshots from")
     parser.add_argument("-s", "--server", default=SERVER_URL, help=f"Server URL (default: {SERVER_URL})")
-    parser.add_argument("-p", "--provider", default="auto", choices=["auto", "openai", "anthropic"], 
-                        help="AI provider to use (default: auto)")
+    parser.add_argument("-p", "--provider", default="openrouter", choices=["auto", "openai", "openrouter", "anthropic"])
+    parser.add_argument("-m", "--model", default="anthropic/claude-3.7-sonnet", help="Model to use")
+
     args = parser.parse_args()
     
     # Process user input
@@ -282,7 +278,8 @@ def main():
             prompt=final_prompt, 
             image_paths=image_paths,
             server_url=args.server,
-            provider=args.provider
+            provider=args.provider,
+            model=args.model
         )
         
         # Save the response
