@@ -38,7 +38,7 @@ def generate():
     data = request.json
     model = data.get('model', 'gpt-4o')
     messages = data.get('messages', [])
-    max_tokens = data.get('max_tokens', 1500)
+    max_tokens = data.get('max_tokens', 4000)
     temperature = data.get('temperature', 0.7)
     provider = data.get('provider', 'openrouter')  # Default to OpenAI if not specified
     
