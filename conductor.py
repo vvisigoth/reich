@@ -241,7 +241,7 @@ def main():
     parser.add_argument("-i", "--images", nargs='+', required=False, help="Image files to send along with the prompt")
     parser.add_argument("-u", "--urls", nargs='+', required=False, help="URLs to capture screenshots from")
     parser.add_argument("-s", "--server", default=SERVER_URL, help=f"Server URL (default: {SERVER_URL})")
-    parser.add_argument("-p", "--provider", default="openrouter", choices=["auto", "openai", "openrouter", "anthropic"])
+    parser.add_argument("-p", "--provider", default="openrouter", choices=["ollama", "openai", "openrouter", "anthropic"])
     parser.add_argument("-m", "--model", default="anthropic/claude-3.7-sonnet", help="Model to use")
 
     args = parser.parse_args()

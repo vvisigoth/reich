@@ -2,6 +2,7 @@ import os
 import json
 import time
 import base64
+import requests
 from typing import Dict, Any, Optional, List
 from flask import Flask, request, jsonify
 from openai import OpenAI
@@ -18,6 +19,7 @@ config = load_config()
 openai_api_key = config.get("openai_api_key")
 anthropic_api_key = config.get("anthropic_api_key")
 openrouter_api_key = config.get("openrouter_api_key")
+ollama_api_url = config.get("ollama_api_url", "http://localhost:11434")  # Default to standard Ollama port
 
 # Initialize Clients
 openai_client = None
@@ -91,6 +93,76 @@ def generate():
                 'model': model,
                 'provider': 'openrouter'
             })
+        elif provider == 'ollama':
+            # Process messages for Ollama format
+            ollama_messages = []
+            
+            # Handling images for Ollama
+            has_images = False
+            for msg in messages:
+                content = msg.get("content", "")
+                
+                # Check if content is a list (might contain images)
+                if isinstance(content, list):
+                    text_parts = []
+                    for part in content:
+                        if isinstance(part, dict):
+                            # Handle image_url type content
+                            if part.get("type") == "image_url":
+                                has_images = True
+                                # For now, we'll skip images as Ollama has limited multimodal support
+                                # Future: implement image handling for supported models
+                                text_parts.append("[Image content not supported in this Ollama model]")
+                            # Add other content types as text
+                            elif "text" in part:
+                                text_parts.append(part["text"])
+                        elif isinstance(part, str):
+                            text_parts.append(part)
+                    ollama_messages.append({"role": msg["role"], "content": " ".join(text_parts)})
+                else:
+                    # Simple text message
+                    ollama_messages.append({"role": msg["role"], "content": content})
+            
+            # Warn if images were skipped
+            if has_images:
+                print("Warning: Images in messages were skipped for Ollama request")
+            
+            # Prepare Ollama API request
+            ollama_data = {
+                "model": model,
+                "messages": ollama_messages,
+                "options": {
+                    "temperature": temperature,
+                    "num_predict": max_tokens
+                }
+            }
+            
+            # Send request to Ollama API
+            try:
+                ollama_response = requests.post(
+                    f"{ollama_api_url}/api/chat",
+                    json=ollama_data,
+                    headers={"Content-Type": "application/json"}
+                )
+                
+                # Handle response
+                if ollama_response.status_code == 200:
+                    response_data = ollama_response.json()
+                    return jsonify({
+                        'success': True,
+                        'content': response_data.get('message', {}).get('content', ''),
+                        'model': model,
+                        'provider': 'ollama'
+                    })
+                else:
+                    return jsonify({
+                        'success': False,
+                        'error': f"Ollama API error: {ollama_response.status_code} - {ollama_response.text}"
+                    }), 500
+            except Exception as e: return jsonify({
+                    'success': False,
+                    'error': f"Error connecting to Ollama API: {str(e)}"
+                }), 500
         else:
             return jsonify({
                 'success': False,
@@ -110,9 +182,24 @@ def health_check():
         available_providers.append('openai')
     if anthropic_client:
         available_providers.append('anthropic')
-    if anthropic_client:
+    if openrouter_client:
         available_providers.append('openrouter')
-        
+    # Check if Ollama is available by making a simple request
+    try:
+        response = requests.get(f"{ollama_api_url}/api/tags")
+        print("ollama response", response)
+        if response.status_code == 200:
+            available_providers.append('ollama')
+            # Get available models
+            models = response.json().get('models', [])
+            return jsonify({
+                'status': 'ok',
+                'available_providers': available_providers,
+                'ollama_models': [model.get('name') for model in models]
+            })
+    except Exception as e:
+        print("ollama error", e)
+        pass
     return jsonify({
         'status': 'ok',
         'available_providers': available_providers

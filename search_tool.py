@@ -31,7 +31,7 @@ def parse_arguments():
     parser.add_argument("-m", "--model", default="x-ai/grok-2-vision-1212", 
                         help="LLM model to use for summarization")
     parser.add_argument("-p", "--provider", default="openrouter", 
-                        choices=["openai", "anthropic", "openrouter"],
+                        choices=["openai", "anthropic", "openrouter", "ollama"],
                         help="AI provider to use")
     parser.add_argument("-s", "--save", action="store_true", 
                         help="Save search results and summaries")
