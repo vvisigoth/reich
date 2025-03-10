@@ -1,7 +1,15 @@
 lib
 bin
+commands
+patches
 include
+ollama-api-docs.md
+log.txt
 requirements.txt
+search_results
+pyenv.cfg
+share
+reich_log.tmp
 start.sh
 dialogue
 history
