@@ -1,0 +1,2508 @@
+
+
+Let's add support for using ollama as a provider in compser.py
+
+
+Directory Structure:
+.
+├── !
+├── commands
+│   ├── 1741374726.sh
+│   ├── 1741374768.sh
+│   ├── 1741377087.sh
+│   └── 1741395755.sh
+├── composer.py
+├── conductor.py
+├── diarize.py
+├── example.config.json
+├── log.txt
+├── patches
+│   ├── 1741374726.patch
+│   ├── 1741374768.patch
+│   ├── 1741377087.patch
+│   └── 1741395755.patch
+├── preamble.txt
+├── prompt
+├── pyvenv.cfg
+├── reich_log.tmp
+├── search.py
+├── search_results
+│   ├── final_summary_1741483694.txt
+│   ├── search_results_1741483694.json
+│   └── summaries_1741483694.txt
+├── search_tool.py
+├── search_utils.py
+├── share
+│   └── man
+│       └── man1
+│           └── isympy.1
+├── system.txt
+├── tokencheck.py
+└── url_fetch.py
+
+7 directories, 28 files
+
+
+# Content of preamble.txt:
+
+
+# Content of tokencheck.py:
+import argparse
+import sys
+import tiktoken
+
+def estimate_tokens(text, model='gpt-4'):
+    # Initialize the tokenizer for the specified model
+    encoding = tiktoken.encoding_for_model(model)
+    
+    # Encode the text to get the token IDs
+    token_ids = encoding.encode(text)
+    
+    # Return the number of tokens
+    return len(token_ids)
+
+def main():
+    parser = argparse.ArgumentParser(description="Estimate the number of tokens in a given text.")
+    parser.add_argument('-f', '--file', nargs='+', help='List of text files to read from')
+    parser.add_argument('-m', '--model', default='gpt-4', help='Model to use for token estimation (default: gpt-4)')
+    
+    args = parser.parse_args()
+
+    input_text = ""
+    
+    if args.file:
+        # Read and concatenate text from the specified files
+        for file_path in args.file:
+            try:
+                with open(file_path, 'r', encoding='utf-8') as file:
+                    input_text += file.read() + "\n"
+            except FileNotFoundError:
+                print(f"File not found: {file_path}")
+                sys.exit(1)
+    else:
+        # Read text from standard input
+        input_text = sys.stdin.read()
+
+    # Estimate the number of tokens
+    token_count = estimate_tokens(input_text, model=args.model)
+    print(f"Estimated number of tokens: {token_count}")
+
+if __name__ == '__main__':
+    main()
+
+# Content of search_tool.py:
+#! python3.12
+
+import os
+import sys
+import argparse
+import json
+import base64
+import requests
+from pathlib import Path
+import time
+
+# Import from existing modules
+from url_fetch import capture_webpage
+from search_utils import (
+    process_keywords,
+    search_google_api,
+    load_config,
+    create_temp_directory
+)
+
+# Constants
+SERVER_URL = "http://localhost:5555/api"  # Composer.py server URL
+RESULTS_DIR = "search_results"  # Directory to store search results
+
+def parse_arguments():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(description="Search tool with screenshot capture and LLM summarization")
+    parser.add_argument("keywords", nargs="+", help="Keywords to search for")
+    parser.add_argument("-n", "--num-results", type=int, default=5, 
+                        help="Number of search results to process (default: 5)")
+    parser.add_argument("-m", "--model", default="x-ai/grok-2-vision-1212", 
+                        help="LLM model to use for summarization")
+    parser.add_argument("-p", "--provider", default="openrouter", 
+                        choices=["openai", "anthropic", "openrouter"],
+                        help="AI provider to use")
+    parser.add_argument("-s", "--save", action="store_true", 
+                        help="Save search results and summaries")
+    parser.add_argument("-o", "--output-dir", 
+                        help="Directory to save results (default: search_results)")
+    return parser.parse_args()
+
+def encode_image(image_path):
+    """Encode image to base64 for sending to LLM."""
+    with open(image_path, "rb") as image_file:
+        return base64.b64encode(image_file.read()).decode("utf-8")
+
+def prepare_prompt_for_screenshot(url, title, snippet):
+    """Prepare a prompt for the LLM to analyze a screenshot."""
+    return f"""Please analyze this screenshot of search result: {title}
+
+URL: {url}
+
+Context from search snippet: {snippet}
+
+Provide a concise summary of what you see in the screenshot. Focus on the main content, key information, and how it relates to the search query. Ignore ads, navigation elements, and other UI components unless they're relevant to understanding the content."""
+
+def prepare_summary_prompt(search_query, individual_summaries):
+    """Prepare a prompt for the LLM to create a final summary of all results."""
+    summaries_text = "\n\n".join([f"Result {i+1}: {summary}" for i, summary in enumerate(individual_summaries)])
+    
+    return f"""You searched for: {search_query}
+
+Here are summaries of the top search results:
+
+{summaries_text}
+
+Please provide a comprehensive yet concise summary of these search results. Identify common themes, contradictions, and unique insights. Focus on answering the original search query based on the information available in these results."""
+
+def send_to_llm(prompt, image_path=None, server_url=SERVER_URL, provider="openai", model="gpt-4o"):
+    """Send a prompt and optional image to the LLM via composer.py server."""
+    messages = []
+    
+    # Add image if provided
+    if image_path:
+        image_base64 = encode_image(image_path)
+        
+        if provider == "anthropic":
+            messages.append({
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": image_base64
+                        }
+                    }
+                ]
+            })
+        else:  # OpenAI or OpenRouter format
+            messages.append({
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/png;base64,{image_base64}"
+                        }
+                    }
+                ]
+            })
+    
+    # Add text prompt
+    messages.append({"role": "user", "content": prompt})
+    
+    # Prepare request data
+    request_data = {
+        "messages": messages,
+        "max_tokens": 1000,
+        "temperature": 0.7,
+        "provider": provider,
+        "model": model
+    }
+    
+    # Send request to composer.py server
+    try:
+        response = requests.post(
+            f"{server_url}/generate",
+            json=request_data,
+            headers={"Content-Type": "application/json"}
+        )
+        
+        # Handle response
+        if response.status_code == 200:
+            result = response.json()
+            if result.get("success", False):
+                return result.get("content", "")
+            else:
+                error_msg = result.get("error", "Unknown error")
+                raise Exception(f"Server error: {error_msg}")
+        else:
+            raise Exception(f"HTTP error: {response.status_code} - {response.text}")
+            
+    except requests.exceptions.RequestException as e:
+        raise Exception(f"Connection error: {str(e)}")
+
+def save_results(query, search_results, screenshots, summaries, final_summary, output_dir):
+    """Save search results, screenshots, and summaries to files."""
+    # Create output directory if it doesn't exist
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Generate timestamp for filenames
+    timestamp = int(time.time())
+    
+    # Save search results as JSON
+    search_results_file = os.path.join(output_dir, f"search_results_{timestamp}.json")
+    with open(search_results_file, "w") as f:
+        json.dump(search_results, f, indent=2)
+    
+    # Save individual summaries
+    summaries_file = os.path.join(output_dir, f"summaries_{timestamp}.txt")
+    with open(summaries_file, "w") as f:
+        for i, summary in enumerate(summaries):
+            f.write(f"Result {i+1}: {search_results[i]['title']}\n")
+            f.write(f"URL: {search_results[i]['link']}\n")
+            f.write(f"{summary}\n\n")
+    
+    # Save final summary
+    final_summary_file = os.path.join(output_dir, f"final_summary_{timestamp}.txt")
+    with open(final_summary_file, "w") as f:
+        f.write(f"Search Query: {query}\n\n")
+        f.write(final_summary)
+    
+    print(f"Results saved to {output_dir}/")
+    return {
+        "search_results": search_results_file,
+        "summaries": summaries_file,
+        "final_summary": final_summary_file,
+        "screenshots": screenshots
+    }
+
+def main():
+    """Main function to run the search tool."""
+    # Parse arguments
+    args = parse_arguments()
+    
+    # Process keywords into a search query
+    search_query = " ".join(args.keywords)
+    print(f"Searching for: {search_query}")
+    
+    # Set output directory
+    output_dir = args.output_dir if args.output_dir else RESULTS_DIR
+    
+    # Create temp directory for screenshots
+    temp_dir = create_temp_directory()
+    
+    try:
+        # Search Google API
+        search_results = search_google_api(search_query, num_results=args.num_results)
+        print(f"Found {len(search_results)} results")
+        
+        # Take screenshots of each result
+        screenshots = []
+        for i, result in enumerate(search_results):
+            print(f"Capturing screenshot for result {i+1}: {result['title']}")
+            try:
+                # Generate filename based on search result
+                filename = f"result_{i+1}_{int(time.time())}.png"
+                output_path = os.path.join(temp_dir, filename)
+                
+                # Capture screenshot
+                screenshot_path = capture_webpage(result['link'], output_file=output_path)
+                screenshots.append(screenshot_path)
+                print(f"Screenshot saved: {screenshot_path}")
+                
+            except Exception as e:
+                print(f"Error capturing screenshot for {result['link']}: {str(e)}")
+                screenshots.append(None)
+        
+        # Analyze screenshots with LLM
+        summaries = []
+        for i, (result, screenshot) in enumerate(zip(search_results, screenshots)):
+            if screenshot:
+                print(f"Analyzing screenshot for result {i+1}")
+                prompt = prepare_prompt_for_screenshot(
+                    result['link'], 
+                    result['title'], 
+                    result.get('snippet', 'No snippet available')
+                )
+                
+                # Send to LLM
+                summary = send_to_llm(
+                    prompt=prompt,
+                    image_path=screenshot,
+                    provider=args.provider,
+                    model=args.model
+                )
+                
+                summaries.append(summary)
+                print(f"Analysis complete for result {i+1}")
+            else:
+                summaries.append("Screenshot capture failed for this result.")
+        
+        # Create final summary
+        print("Creating final summary...")
+        final_prompt = prepare_summary_prompt(search_query, summaries)
+        final_summary = send_to_llm(
+            prompt=final_prompt,
+            provider=args.provider,
+            model=args.model
+        )
+        
+        print("\n" + "="*50)
+        print("FINAL SUMMARY")
+        print("="*50)
+        print(final_summary)
+        print("="*50)
+        
+        # Save results if requested
+        if args.save:
+            saved_files = save_results(
+                search_query,
+                search_results,
+                screenshots,
+                summaries,
+                final_summary,
+                output_dir
+            )
+            print(f"Results saved to {saved_files['final_summary']}")
+        
+    except Exception as e:
+        print(f"Error: {str(e)}")
+        return 1
+    
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())
+
+
+# Content of system.txt:
+You are an AI code assistant. Your purpose is to take a prompt that is either an intitial spec, a request to fix a bug or a request to add a feature.
+
+When a code snippet or file is an appropriate response, make sure to always generate the whole file. Do not just generate snippets or the diff.
+
+Sometimes you will have to answer general knowledge requests as a way to test the system.
+
+
+# Content of composer.py:
+import os
+import json
+import time
+import base64
+from typing import Dict, Any, Optional, List
+from flask import Flask, request, jsonify
+from openai import OpenAI
+from anthropic import Anthropic
+
+app = Flask(__name__)
+
+# Load Configuration
+def load_config():
+    with open('config.json', 'r') as f:
+        return json.load(f)
+
+config = load_config()
+openai_api_key = config.get("openai_api_key")
+anthropic_api_key = config.get("anthropic_api_key")
+openrouter_api_key = config.get("openrouter_api_key")
+
+# Initialize Clients
+openai_client = None
+anthropic_client = None
+openrouter_client = None
+
+if openai_api_key:
+    openai_client = OpenAI(api_key=openai_api_key)
+
+if anthropic_api_key:
+    anthropic_client = Anthropic(api_key=anthropic_api_key)
+
+if openrouter_api_key:
+    openrouter_client = OpenAI(base_url="https://openrouter.ai/api/v1",api_key=openrouter_api_key)
+
+@app.route('/api/generate', methods=['POST'])
+def generate():
+    data = request.json
+    model = data.get('model', 'gpt-4o')
+    messages = data.get('messages', [])
+    max_tokens = data.get('max_tokens', 4000)
+    temperature = data.get('temperature', 0.7)
+    provider = data.get('provider', 'openrouter')  # Default to OpenAI if not specified
+    
+    try:
+        if provider == 'openai' and openai_client:
+            response = openai_client.chat.completions.create(
+                model=model,
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=temperature
+            )
+            return jsonify({
+                'success': True,
+                'content': response.choices[0].message.content.strip(),
+                'model': model,
+                'provider': 'openai'
+            })
+            
+        elif provider == 'anthropic' and anthropic_client:
+            # Convert OpenAI message format to Anthropic format
+            anthropic_messages = []
+            for msg in messages:
+                anthropic_messages.append({
+                    "role": msg["role"],
+                    "content": msg["content"]
+                })
+            
+            response = anthropic_client.messages.create(
+                model="claude-3-7-sonnet-20250219" if model == "default" else model,
+                max_tokens=max_tokens,
+                messages=anthropic_messages
+            )
+            
+            return jsonify({
+                'success': True,
+                'content': response.content[0].text.strip(),
+                'model': model,
+                'provider': 'anthropic'
+            })
+        elif provider == 'openrouter' and openrouter_client:
+            response = openrouter_client.chat.completions.create(
+                model=model,
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=temperature
+            )
+            return jsonify({
+                'success': True,
+                'content': response.choices[0].message.content.strip(),
+                'model': model,
+                'provider': 'openrouter'
+            })
+        else:
+            return jsonify({
+                'success': False,
+                'error': f"Provider '{provider}' not available or no valid API keys found."
+            }), 400
+            
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+@app.route('/api/health', methods=['GET'])
+def health_check():
+    available_providers = []
+    if openai_client:
+        available_providers.append('openai')
+    if anthropic_client:
+        available_providers.append('anthropic')
+    if anthropic_client:
+        available_providers.append('openrouter')
+        
+    return jsonify({
+        'status': 'ok',
+        'available_providers': available_providers
+    })
+
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5555))
+    app.run(host='0.0.0.0', port=port, debug=True)
+
+
+# Content of url_fetch.py:
+import argparse
+import time
+import os
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.common.by import By
+from urllib.parse import urlparse
+
+def capture_webpage(url, output_type='screenshot', output_file=None):
+    # Set up headless Chrome
+    chrome_options = Options()
+    chrome_options.add_argument("--headless")
+    chrome_options.add_argument("--start-maximized")  # Ensures full-width capture
+    driver = webdriver.Chrome(options=chrome_options)
+
+    try:
+        # Load the page
+        driver.get(url)
+
+        # Wait for page to load (adjust timeout and conditions as needed)
+        wait = WebDriverWait(driver, 10)
+        wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+
+        # Additional wait to allow AJAX content to load
+        time.sleep(5)
+
+        # Create 'captures' directory if it doesn't exist
+        os.makedirs('captures', exist_ok=True)
+
+        # Generate filename from URL
+        if output_file:
+            filename = output_file
+        else:
+            parsed_url = urlparse(url)
+            filename = parsed_url.netloc + parsed_url.path.replace('/', '_')
+            if not filename.strip():
+                filename = 'homepage'
+
+        if output_type == 'screenshot':
+            # Get the total height of the page
+            total_height = driver.execute_script("return document.body.scrollHeight")
+            
+            # Set window size to capture full page
+            driver.set_window_size(1920, total_height)
+            
+            # Take a full page screenshot
+            screenshot_path = os.path.join('captures', f"{filename}.png")
+            driver.save_screenshot(screenshot_path)
+            print(f"Screenshot saved as {screenshot_path}")
+            return screenshot_path
+        elif output_type == 'content':
+            # Get full page content
+            page_content = driver.page_source
+            content_path = os.path.join('captures', f"{filename}.html")
+            with open(content_path, "w", encoding="utf-8") as f:
+                f.write(page_content)
+            print(f"Full page content saved as {content_path}")
+            return content_path
+
+    finally:
+        driver.quit()
+
+def main():
+    parser = argparse.ArgumentParser(description="Capture webpage screenshot or content")
+    parser.add_argument("url", help="URL to capture")
+    parser.add_argument("--type", choices=['screenshot', 'content'], default='screenshot',
+                        help="Type of capture: 'screenshot' or 'content' (default: screenshot)")
+    parser.add_argument("-o", "--output", help="Output file name")
+    
+    args = parser.parse_args()
+    
+    capture_webpage(args.url, args.type, args.output)
+
+if __name__ == "__main__":
+    main()
+
+
+# Content of pyvenv.cfg:
+home = /opt/homebrew/opt/python@3.12/bin
+include-system-site-packages = false
+version = 3.12.9
+executable = /opt/homebrew/Cellar/python@3.12/3.12.9/Frameworks/Python.framework/Versions/3.12/bin/python3.12
+command = /opt/homebrew/opt/python@3.12/bin/python3.12 -m venv /Users/steppe/reich
+
+
+# Content of diarize.py:
+import os, re
+import time
+from openai import OpenAI
+from pathlib import Path
+import glob
+import shutil
+
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+DIALOGUE_DIR = "dialogue/"
+HISTORY_DIR = "history/"
+
+def get_epoch_time():
+    return str(int(time.time()))
+
+def extract_digits_from_filename(filename):
+    match = re.match(r'dialogue/(\d+)-prompt.txt', filename)
+    if match:
+        return match.group(1)
+    return None
+
+def send_summary_request_to_openai(text, recent_summary):
+    messages = [
+        {"role": "system", "content": "You are making a concise summary of a conversation between a user an an AI code assistant. 500 words max."},
+        {"role": "assistant", "content": recent_summary},
+        {"role": "user", "content": f"Summarize the following exchange: {text}"}
+    ]
+    print(f"RECENT SUMMARY: {recent_summary}")
+
+    response = client.chat.completions.create(
+        model="gpt-4",
+        messages=messages,
+        max_tokens=1500,
+        temperature=0.7
+    )
+    return response.choices[0].message.content.strip()
+
+def save_summary(summary_text):
+    epoch_time = get_epoch_time()
+    summary_file = os.path.join(DIALOGUE_DIR, f"{epoch_time}-summary.txt")
+    with open(summary_file, 'w') as f:
+        f.write(summary_text)
+    return summary_file
+
+def move_files_to_history(files):
+    Path(HISTORY_DIR).mkdir(exist_ok=True)
+    for f in files:
+        shutil.move(f, HISTORY_DIR)
+
+def summarize_conversation():
+    files = sorted(glob.glob(os.path.join(DIALOGUE_DIR, "*.txt")), key=os.path.getmtime)
+    prompts = [f for f in files if "prompt" in f]
+    responses = [f for f in files if "response" in f]
+    summaries = [f for f in files if "summary" in f]
+
+    recent_summary = ""
+    if summaries:
+        with open(summaries[-1], 'r') as f:
+            recent_summary = f.read().strip()
+
+    # This should queue off of responses, as there is a lag between prompts and responses
+    if len(responses) > 5:
+        text = ""
+        for i in range(len(responses)):
+            key = extract_digits_from_filename(prompts[i])
+            p = prompts[i]
+            print(f"prompts: {p}")
+            print(f"key {key}")
+            with open(prompts[i], 'r') as f:
+                text += "\nUser: " + f.read()
+            try:
+                with open(f"dialogue/{key}-response.txt", 'r') as f:
+                    text += "\nAI: " + f.read()
+            except:
+                text += "\nAI: <no response>"
+        summary = send_summary_request_to_openai(text, recent_summary)
+        save_summary(summary)
+        # Move processed files to history directory
+        move_files_to_history(prompts[:5])
+        move_files_to_history(responses[:5])
+
+def main():
+    Path(DIALOGUE_DIR).mkdir(exist_ok=True)
+    summarize_conversation()
+
+if __name__ == "__main__":
+    main()
+
+
+# Content of log.txt:
+Script started on Mon Mar 10 10:36:47 2025
+[1m[7m%[27m[1m[0m                                                                  
+ 
+
+[0m[27m[24m[Jsteppe@Mac reich % [K[?2004hm bbrb  ggit b branches[?2004l
+
+git: 'branches' is not a git command. See 'git --help'.
+[1m[7m%[27m[1m[0m                                                                  
+ 
+
+[0m[27m[24m[Jsteppe@Mac reich % [K[?2004hggit branches[8D        [9D branches  [?2004l
+
+[?1h=
+  client_server[m[m
+  feature/search_tool_fix[m[m
+  main[m[m
+  patcher[m[m
+* [32mreverted_gen[m[m
+
+[K[?1l>[1m[7m%[27m[1m[0m                                                                  
+ 
+
+[0m[27m[24m[Jsteppe@Mac reich % [K[?2004hggit status[?2004l
+
+On branch reverted_gen
+Changes to be committed:
+  (use "git restore --staged <file>..." to unstage)
+	[32mmodified:   exclude.txt[m
+
+[1m[7m%[27m[1m[0m                                                                  
+ 
+
+[0m[27m[24m[Jsteppe@Mac reich % [K[?2004hggit stash[?2004l
+
+Saved working directory and index state WIP on reverted_gen: 1caef1c2 got the search tool working
+[1m[7m%[27m[1m[0m                                                                  
+ 
+
+[0m[27m[24m[Jsteppe@Mac reich % [K[?2004hggit checkout main[?2004l
+
+Switched to branch 'main'
+Your branch is up to date with 'origin/main'.
+[1m[7m%[27m[1m[0m                                                                  
+ 
+
+[0m[27m[24m[Jsteppe@Mac reich % [K[?2004hggit merge revereg  ted_getn  n[?2004l
+
+hint: Waiting for your editor to close the file... [?1049h[?1h=[1;28r[27m[24m[23m[0m[38;5;231m[48;5;235m[?25l[28;1H"~/reich/.git/MERGE_MSG"                                           [28;26H6L, 254B[1;1H[38;5;241m  1 [0m[38;5;231m[48;5;235m[1m[38;5;68mMerge branch 'reverted_gen'[0m[38;5;231m[48;5;235m                                    [2;1H[38;5;241m  2 # Please enter a commit message to explain why this merge is nee[3;1H    cessary,[0m[38;5;231m[48;5;235m                                                       [4;1H[38;5;241m  3 # especially if it merges an updated upstream into a topic brann[5;1H    ch.[0m[38;5;231m[48;5;235m                                                            [6;1H[38;5;241m  4 #[0m[38;5;231m[48;5;235m                                                              [7;1H[38;5;241m  5 # Lines starting with '#' will be ignored, and an empty messagee[8;1H     aborts[0m[38;5;231m[48;5;235m                                                        [9;1H[38;5;241m  6 # the commit.[0m[38;5;231m[48;5;235m                                                  [10;1H[38;5;68m~                                                                  [11;1H~                                                                  [12;1H~                                                                  [13;1H~                                                                  [14;1H~                                                                  [15;1H~                                                                  [16;1H~                                                                  [17;1H~                                                                  [18;1H~                                                                  [19;1H~                                                                  [20;1H~                                                                  [21;1H~                                                                  [22;1H~                                                                  [23;1H~                                                                  [24;1H~                                                                  [25;1H~                                                                  [26;1H~                                                                  [27;1H~                                                                  [1;5H[34h[?25h[?25l[0m[38;5;231m[48;5;235m[38;5;241m# Please enter a commit message to explain why this merge is nee[2;1H    cessary,[0m[38;5;231m[48;5;235m                                                       [3;3H[38;5;241m2 # especially if it merges an updated upstream into a topic brann[4;1H    ch.[0m[38;5;231m[48;5;235m                                                            [5;3H[38;5;241m3 #[0m[38;5;231m[48;5;235m  [6;6H[38;5;241m Lines starting with '#' will be ignored, and an empty messagee[7;1H     abort[0m[38;5;231m[48;5;235m[1C                                                        [8;3H[38;5;241m5 # the commit.[0m[38;5;231m[48;5;235m
+[38;5;68m~                                                                  [1;5H[34h[?25h[?25l[0m[38;5;231m[48;5;235m[28;1H[38;5;235m[48;5;220m-- INSERT --[0m[38;5;231m[48;5;235m                     [1;5H[34h[?25h[?25l[1m[38;5;68mO# Please enter a commit message to explain why th[0m[38;5;231m[48;5;235mis merge is nn[2;1H[38;5;241m [0m[38;5;231m[48;5;235m[3Cecessary,[1;6H[34h[?25h[28;1H            [1;5H[?25l[34h[?25h[?25l[28;1H1 change; before #2  1 second ago[1;5H[38;5;241m# Please enter a commit message to explain why this merge is nee[2;1H    cessary,[0m[38;5;231m[48;5;235m [1;5H[34h[?25h[?25l[28;1H[38;5;235m[48;5;220m-- INSERT --[0m[38;5;231m[48;5;235m                     [1;5H                                                               [2;3H[38;5;241m2 # Please enter a commit message to explain why this merge is nee[3;1H    cessary,[0m[38;5;231m[48;5;235m                                                       [4;3H[38;5;241m3 # especially if it merges an updated upstream into a topic brann[5;1H    ch.[0m[38;5;231m[48;5;235m[6;6H                                                              [7;3H[38;5;241m5 # Lines starting with '#' will be ignored, and an empty messagee[8;1H     aborts[0m[38;5;231m[48;5;235m      
+[38;5;241m  6 # the commit.[0m[38;5;231m[48;5;235m                                                  [1;5H[34h[?25h[?25l[1m[38;5;68mM[34h[?25h[?25le[34h[?25h[?25lr[34h[?25h[?25li[34h[?25h[?25ln[34h[?25h[?25l[0m[38;5;231m[48;5;235m [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l[1m[38;5;68mg[34h[?25h[?25l[0m[38;5;231m[48;5;235m [34h[?25h[?25l[1m[38;5;68mr[34h[?25h[?25li[34h[?25h[?25ln[34h[?25h[?25l[0m[38;5;231m[48;5;235m [34h[?25h[?25l [34h[?25h[?25l[1m[38;5;68mg[34h[?25h[?25li[34h[?25h[?25ln[34h[?25h[?25lg[34h[?25h[?25l [34h[?25h[?25lb[34h[?25h[?25la[34h[?25h[?25lc[34h[?25h[?25lk[34h[?25h[?25l [34h[?25h[?25ls[34h[?25h[?25lo[34h[?25h[?25lm[34h[?25h[?25le[34h[?25h[?25l [34h[?25h[?25lc[34h[?25h[?25lh[34h[?25h[?25la[34h[?25h[?25ln[34h[?25h[?25lg[34h[?25h[?25le[34h[?25h[?25ls[34h[?25h[?25l [34h[?25h[?25lt[34h[?25h[?25lh[34h[?25h[?25la[34h[?25h[?25lt[34h[?25h[?25l [34h[?25h[?25lw[34h[?25h[?25li[34h[?25h[?25ld[34h[?25h[?25l[0m[38;5;231m[48;5;235m [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l[1m[38;5;68md[34h[?25h[?25li[34h[?25h[?25ld[34h[?25h[?25ln[34h[?25h[?25l'[34h[?25h[?25lt[34h[?25h[?25l [34h[?25h[?25lw[34h[?25h[?25lo[34h[?25h[?25lr[34h[?25h[?25lk[34h[?25h[?25l [34h[?25h[?25l[0m[38;5;231m[48;5;235m [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l[1m[38;5;68mr[34h[?25h[?25lo[34h[?25h[?25ll[34h[?25h[?25l[0m[38;5;231m[48;5;235m [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l[1m[38;5;68mR[34h[?25h[?25lo[34h[?25h[?25ll[34h[?25h[?25ll[34h[?25h[?25li[34h[?25h[?25ln[34h[?25h[?25lg[34h[?25h[?25l [34h[?25h[?25lt[34h[?25h[?25lh[34h[?25h[?25li[34h[?25h[?25ln[34h[?25h[?25lg[34h[?25h[?25ls[34h[?25h[?25l [34h[?25h[?25lb[34h[?25h[?25la[34h[?25h[?25lc[34h[?25h[?25lk[34h[?25h[?25l [34h[?25h[?25l[0m[38;5;231m[48;5;235m [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l[1m[38;5;68me[34h[?25h[?25lr[34h[?25h[?25lv[34h[?25h[?25le[34h[?25h[?25lr[34h[?25h[?25l[0m[38;5;231m[48;5;235m [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l[1m[38;5;68mb[34h[?25h[?25le[34h[?25h[?25lr[34h[?25h[?25li[34h[?25h[?25l[0m[38;5;231m[48;5;235m [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l[1m[38;5;68mv[34h[?25h[?25le[34h[?25h[?25lr[34h[?25h[?25lt[34h[?25h[?25lt[34h[?25h[?25li[34h[?25h[?25ln[34h[?25h[?25lg[34h[?25h[?25l [34h[?25h[?25lt[34h[?25h[?25lh[34h[?25h[?25le[34h[?25h[?25l [34h[?25h[?25ld[34h[?25h[?25li[34h[?25h[?25lf[34h[?25h[?25l [34h[?25h[?25lc[34h[?25h[?25l[0m[38;5;231m[48;5;235m [34h[?25h[?25l [34h[?25h[?25l[1m[38;5;68mf[34h[?25h[?25l [34h[?25h[?25lh[34h[?25h[?25la[34h[?25h[?25ln[34h[?25h[?25ld[34h[?25h[?25ll[34h[?25h[?25li[34h[?25h[?25ln[34h[?25h[?25lg[34h[?25h[?25l [34h[?25h[?25lc[34h[?25h[?25lh[34h[?25h[?25la[34h[?25h[?25ln[34h[?25h[?25lg[34h[?25h[?25le[34h[?25h[?25ls[34h[?25h[?25l [34h[?25h[?25lb[34h[?25h[?25le[34h[?25h[?25lc[34h[?25h[?25la[34h[?25h[?25lu[34h[?25h[?25ls[34h[?25h[?25le[34h[?25h[?25l [34h[?25h[?25li[34h[?25h[?25lt[34h[?25h[?25l [34h[?25h[?25l[0m[38;5;231m[48;5;235m [34h[?25h[?25l [34h[?25h[?25l [34h[?25h[?25l[1m[38;5;68mt[34h[?25h[?25lh[34h[?25h[?25le[34h[?25h[?25ly[34h[?25h[?25l [34h[?25h[?25l[0m[38;5;231m[48;5;235mw[34h[?25h[?25le[34h[?25h[?25lr[34h[?25h[?25le[34h[?25h[?25l [34h[?25h[?25lu[34h[?25h[?25ln[34h[?25h[?25ls[34h[?25h[?25lt[34h[?25h[?25la[34h[?25h[?25lb[34h[?25h[?25ll[34h[?25h[?25le[2;5H[34h[?25h[?25l[28;1H            [1;67H[34h[?25h[?25l[28;1HType  :qa!  and press <Enter> to abandon all changes and exit Vim[1;67H[34h[?25h[?25l[34h[?25h[?25l[28;1H                                                                 
+:[34h[?25hw
+[?25l".git/MERGE_MSG" 6L, 290B written[1;67H[34h[?25h[?25l[28;1H                                 
+:[34h[?25hwq
+[?25l".git/MERGE_MSG" 6L, 290B written
+
+
+[39;49m[?1l>[?1049l[34h[?25h
+[KMerge made by the 'ort' strategy.
+ composer.py     |   2 [32m+[m[31m-[m
+ search_tool.py  | 269 [32m+++++++++++++++++++++++++++++++++++++++++++[m
+ search_utils.py | 159 [32m+++++++++++++++++++++++++[m
+ 3 files changed, 429 insertions(+), 1 deletion(-)
+ create mode 100755 search_tool.py
+ create mode 100644 search_utils.py
+[1m[7m%[27m[1m[0m                                                                  
+ 
+
+[0m[27m[24m[Jsteppe@Mac reich % [K[?2004hggit stash pop[?2004l
+
+Auto-merging exclude.txt
+CONFLICT (content): Merge conflict in exclude.txt
+On branch main
+Your branch is ahead of 'origin/main' by 2 commits.
+  (use "git push" to publish your local commits)
+
+Unmerged paths:
+  (use "git restore --staged <file>..." to unstage)
+  (use "git add <file>..." to mark resolution)
+	[31mboth modified:   exclude.txt[m
+
+no changes added to commit (use "git add" and/or "git commit -a")
+The stash entry is kept in case you need it again.
+[1m[7m%[27m[1m[0m                                                                  
+ 
+
+[0m[27m[24m[Jsteppe@Mac reich % [K[?2004hggit  g  vvim erx  c   v  a ccomposer.py [?2004l
+
+[1m[7m%[27m[1m[0m                                                                  
+ 
+
+[0m[27m[24m[Jsteppe@Mac reich % [K[?2004hppytyhon      thon    p  cconduct[?2004l
+
+zsh: command not found: conduct
+[1m[7m%[27m[1m[0m                                                                  
+ 
+
+[0m[27m[24m[Jsteppe@Mac reich % [K[?2004haalisa  as  conduct=ptyh   yton  hon3.12 contuc   du or  ctor.py[?2004l
+
+[1m[7m%[27m[1m[0m                                                                  
+ 
+
+[0m[27m[24m[Jsteppe@Mac reich % [K[?2004halias conduct=python3.12 conductor.py[37Dconduct                              [30D[?2004l
+
+Python 3.12.9 (main, Feb  4 2025, 14:38:38) [Clang 16.0.0 (clang-1600.0.26.6)] on darwin
+Type "help", "copyright", "credits" or "license" for more information.
+>>> exot[K[Kit()[K)
+[1m[7m%[27m[1m[0m                                                                  
+ 
+
+[0m[27m[24m[Jsteppe@Mac reich % [K[?2004hconductalias conduct=python3.12 conductor.py"python3.12 conductor.py[23D[23C"[?2004l
+
+[1m[7m%[27m[1m[0m                                                                  
+ 
+
+[0m[27m[24m[Jsteppe@Mac reich % [K[?2004halias conduct="python3.12 conductor.py"[39Dconduct                                [32D[?2004l
+
+Traceback (most recent call last):
+  File "/Users/steppe/reich/conductor.py", line 4, in <module>
+    from PIL import Image
+ModuleNotFoundError: No module named 'PIL'
+[1m[7m%[27m[1m[0m                                                                  
+ 
+
+[0m[27m[24m[Jsteppe@Mac reich % [K[?2004hppyt p  ssource bin/activate[?2004l
+
+[1m[7m%[27m[1m[0m                                                                  
+ 
+
+[0m[27m[24m[J(reich) steppe@Mac reich % [K[?2004hsource bin/activate[19Dconduct            [12D[?2004l
+
+message_history [{'role': 'user', 'content': "Let's design a search tool that builds on url_fetch.py it will take keyword or list of keywords, use the GOogle Search JSON API (assume I have keys) to retrieve 5 results. Then it will use the screencapture flow from url_fetch to take screenshots of the first 5 results. Finally, it will use the LLM logic from composer.py to send the image to an LLM for summarization."}, {'role': 'assistant', 'content': '{\n  "text": "# Search Tool Implementation\\n\\nПривет! I\'ll design a search tool that combines Google Search API with screenshot capture and LLM summarization. This is an elegant task that brings together several components into a cohesive workflow.\\n\\nLet\'s create a new file called `search_tool.py` that will:\\n1. Take keywords as input\\n2. Use Google Search JSON API to get results\\n3. Capture screenshots of the first 5 results using `url_fetch.py`\\n4. Send the screenshots to an LLM via `composer.py` for summarization\\n\\n## Implementation Plan\\n\\nThe tool will use the existing utilities:\\n- `url_fetch.py` for capturing screenshots\\n- `composer.py` for LLM interaction\\n- `search_utils.py` for Google API interaction\\n\\nHere\'s my implementation of the search tool:\\n\\n```python\\n#!/usr/bin/env python3\\n\\nimport os\\nimport sys\\nimport argparse\\nimport json\\nimport base64\\nimport requests\\nfrom pathlib import Path\\n\\n# Import existing utilities\\nfrom url_fetch import capture_webpage\\nfrom search_utils import (\\n    process_keywords, \\n    search_google_api, \\n    load_config, \\n    create_temp_directory\\n)\\n\\n# Constants\\nSERVER_URL = \\"http://localhost:5555/api\\"  # Composer.py server URL\\nRESULTS_DIR = \\"search_results\\"  # Directory to store search results\\n\\ndef parse_arguments():\\n    \\"\\"\\"Parse command line arguments.\\"\\"\\"\\n    parser = argparse.ArgumentParser(description=\\"Search tool with screenshot capture and LLM summarization\\")\\n    parser.add_argument(\\"keywords\\", nargs=\\"+\\", help=\\"Keywords to search for\\")\\n    parser.add_argument(\\"-n\\", \\"--num-results\\", type=int, default=5, \\n                        help=\\"Number of search results to process (default: 5)\\")\\n    parser.add_argument(\\"-m\\", \\"--model\\", default=\\"gpt-4o\\", \\n                        help=\\"LLM model to use for summarization\\")\\n    parser.add_argument(\\"-p\\", \\"--provider\\", default=\\"openai\\", \\n                        choices=[\\"openai\\", \\"anthropic\\", \\"openrouter\\"],\\n                        help=\\"AI provider to use\\")\\n    parser.add_argument(\\"-s\\", \\"--save\\", action=\\"store_true\\", \\n                        help=\\"Save search results and summaries\\")\\n    return parser.parse_args()\\n\\ndef encode_image(image_path):\\n    \\"\\"\\"Encode image to base64 for sending to LLM.\\"\\"\\"\\n    with open(image_path, \\"rb\\") as image_file:\\n        return base64.b64encode(image_file.read()).decode(\\"utf-8\\")\\n\\ndef prepare_prompt_for_screenshot(url, title, snippet):\\n    \\"\\"\\"Prepare a prompt for the LLM to analyze a screenshot.\\"\\"\\"\\n    return f\\"\\"\\"Please analyze this screenshot of search result: {title}\\n\\nURL: {url}\\n\\nContext from search snippet: {snippet}\\n\\nProvide a concise summary of what you see in the screenshot. Focus on the main content, key information, and how it relates to the search query. Ignore ads, navigation elements, and other UI components unless they\'re relevant to understanding the content.\\"\\"\\"\\n\\ndef prepare_summary_prompt(search_query, individual_summaries):\\n    \\"\\"\\"Prepare a prompt for the LLM to create a final summary of all results.\\"\\"\\"\\n    summaries_text = \\"\\\\n\\\\n\\".join([f\\"Result {i+1}: {summary}\\" for i, summary in enumerate(individual_summaries)])\\n    \\n    return f\\"\\"\\"You searched for: {search_query}\\n\\nHere are summaries of the top search results:\\n\\n{summaries_text}\\n\\nPlease provide a comprehensive yet concise summary of these search results. Identify common themes, contradictions, and unique insights. Focus on answering the original search query based on the information available in these results.\\"\\"\\"\\n\\ndef send_to_llm(prompt, image_path=None, server_url=SERVER_URL, provider=\\"openai\\", model=\\"gpt-4o\\"):\\n    \\"\\"\\"Send a prompt and optional image to the LLM via composer.py server.\\"\\"\\"\\n    messages = []\\n    \\n    # Add image if provided\\n    if image_path:\\n        image_base64 = encode_image(image_path)\\n        \\n        if provider == \\"anthropic\\":\\n            messages.append({\\n                \\"role\\": \\"user\\",\\n                \\"content\\": [\\n                    {\\n                        \\"type\\": \\"image\\",\\n                        \\"source\\": {\\n                            \\"type\\": \\"base64\\",\\n                            \\"media_type\\": \\"image/png\\",\\n                            \\"data\\": image_base64\\n                        }\\n                    }\\n                ]\\n            })\\n        else:  # OpenAI or OpenRouter format\\n            messages.append({\\n                \\"role\\": \\"user\\",\\n                \\"content\\": [\\n                    {\\n                        \\"type\\": \\"image_url\\",\\n                        \\"image_url\\": {\\n                            \\"url\\": f\\"data:image/png;base64,{image_base64}\\"\\n                        }\\n                    }\\n                ]\\n            })\\n    \\n    # Add text prompt\\n    messages.append({\\"role\\": \\"user\\", \\"content\\": prompt})\\n    \\n    # Prepare request data\\n    request_data = {\\n        \\"messages\\": messages,\\n        \\"max_tokens\\": 1000,\\n        \\"temperature\\": 0.7,\\n        \\"provider\\": provider,\\n        \\"model\\": model\\n    }\\n    \\n    # Send request to composer.'}, {'role': 'user', 'content': "Let's design a search tool that builds on url_fetch.py it will take keyword or list of keywords, use the GOogle Search JSON API (assume I have keys) to retrieve 5 results. Then it will use the screencapture flow from url_fetch to take screenshots of the first 5 results. Finally, it will use the LLM logic from composer.py to send the image to an LLM for summarization."}, {'role': 'assistant', 'content': '# Search Tool Implementation\n\nI\'ll create a comprehensive search tool that combines Google Search API with screenshot capture and LLM summarization. This tool will:\n\n1. Accept keywords as input\n2. Use Google Search API to find relevant results\n3. Capture screenshots of the top 5 results\n4. Send each screenshot to an LLM for analysis\n5. Provide a final summary of all the search results\n\nLet\'s implement this in `search_tool.py`:\n\n```python\n#!/usr/bin/env python3\n\nimport os\nimport sys\nimport argparse\nimport json\nimport base64\nimport requests\nfrom pathlib import Path\nimport time\n\n# Import from existing modules\nfrom url_fetch import capture_webpage\nfrom search_utils import (\n    process_keywords,\n    search_google_api,\n    load_config,\n    create_temp_directory\n)\n\n# Constants\nSERVER_URL = "http://localhost:5555/api"  # Composer.py server URL\nRESULTS_DIR = "search_results"  # Directory to store search results\n\ndef parse_arguments():\n    """Parse command line arguments."""\n    parser = argparse.ArgumentParser(description="Search tool with screenshot capture and LLM summarization")\n    parser.add_argument("keywords", nargs="+", help="Keywords to search for")\n    parser.add_argument("-n", "--num-results", type=int, default=5, \n                        help="Number of search results to process (default: 5)")\n    parser.add_argument("-m", "--model", default="gpt-4o", \n                        help="LLM model to use for summarization")\n    parser.add_argument("-p", "--provider", default="openai", \n                        choices=["openai", "anthropic", "openrouter"],\n                        help="AI provider to use")\n    parser.add_argument("-s", "--save", action="store_true", \n                        help="Save search results and summaries")\n    parser.add_argument("-o", "--output-dir", \n                        help="Directory to save results (default: search_results)")\n    return parser.parse_args()\n\ndef encode_image(image_path):\n    """Encode image to base64 for sending to LLM."""\n    with open(image_path, "rb") as image_file:\n        return base64.b64encode(image_file.read()).decode("utf-8")\n\ndef prepare_prompt_for_screenshot(url, title, snippet):\n    """Prepare a prompt for the LLM to analyze a screenshot."""\n    return f"""Please analyze this screenshot of search result: {title}\n\nURL: {url}\n\nContext from search snippet: {snippet}\n\nProvide a concise summary of what you see in the screenshot. Focus on the main content, key information, and how it relates to the search query. Ignore ads, navigation elements, and other UI components unless they\'re relevant to understanding the content."""\n\ndef prepare_summary_prompt(search_query, individual_summaries):\n    """Prepare a prompt for the LLM to create a final summary of all results."""\n    summaries_text = "\\n\\n".join([f"Result {i+1}: {summary}" for i, summary in enumerate(individual_summaries)])\n    \n    return f"""You searched for: {search_query}\n\nHere are summaries of the top search results:\n\n{summaries_text}\n\nPlease provide a comprehensive yet concise summary of these search results. Identify common themes, contradictions, and unique insights. Focus on answering the original search query based on the information available in these results."""\n\ndef send_to_llm(prompt, image_path=None, server_url=SERVER_URL, provider="openai", model="gpt-4o"):\n    """Send a prompt and optional image to the LLM via composer.py server."""\n    messages = []\n    \n    # Add image if provided\n    if image_path:\n        image_base64 = encode_image(image_path)\n        \n        if provider == "anthropic":\n            messages.append({\n                "role": "user",\n                "content": [\n                    {\n                        "type": "image",\n                        "source": {\n                            "type": "base64",\n                            "media_type": "image/png",\n                            "data": image_base64\n                        }\n                    }\n                ]\n            })\n        else:  # OpenAI or OpenRouter format\n            messages.append({\n                "role": "user",\n                "content": [\n                    {\n                        "type": "image_url",\n                        "image_url": {\n                            "url": f"data:image/png;base64,{image_base64}"\n                        }\n                    }\n                ]\n            })\n    \n    # Add text prompt\n    messages.append({"role": "user", "content": prompt})\n    \n    # Prepare request data\n    request_data = {\n        "messages": messages,\n        "max_tokens": 1000,\n        "temperature": 0.7,\n        "provider": provider,\n        "model": model\n    }\n    \n    # Send request to composer.py server\n    try:\n        response = requests.post(\n            f"{server_url}/generate",\n            json=request_data,\n            headers={"Content-Type": "application/json"}\n        )\n        \n        # Handle response\n        if response.status_code == 200:\n            result = response.json()\n            if result.get("success", False):\n                return result.get("content", "")\n            else:\n                error_msg = result.get("error", "Unknown error")\n                raise Exception(f"Server error: {error_msg}")\n        else:\n            raise Exception(f"HTTP error: {response.status_code} - {response.text}")\n            \n    except requests.exceptions.RequestException as e:\n        raise Exception(f"Connection error: {str(e)}")\n\ndef save_results(query, search_results, screenshots, summaries, final_summary, output_dir):\n    """Save search results, screenshots, and summaries to files."""\n    # Create output directory if it doesn\'t exist\n    os.makedirs(output_dir, exist_ok=True)\n    \n    # Generate timestamp for filenames\n    timestamp = int(time.time())\n    \n    # Save search results as JSON'}, {'role': 'user', 'content': "Let's design a search tool that builds on url_fetch.py it will take keyword or list of keywords, use the GOogle Search JSON API (assume I have keys) to retrieve 5 results. Then it will use the screencapture flow from url_fetch to take screenshots of the first 5 results. Finally, it will use the LLM logic from composer.py to send the image to an LLM for summarization."}, {'role': 'assistant', 'content': 'Let me continue with the implementation of the search tool:\n\n```python\ndef save_results(query, search_results, screenshots, summaries, final_summary, output_dir):\n    """Save search results, screenshots, and summaries to files."""\n    # Create output directory if it doesn\'t exist\n    os.makedirs(output_dir, exist_ok=True)\n    \n    # Generate timestamp for filenames\n    timestamp = int(time.time())\n    \n    # Save search results as JSON\n    search_results_file = os.path.join(output_dir, f"search_results_{timestamp}.json")\n    with open(search_results_file, "w") as f:\n        json.dump(search_results, f, indent=2)\n    \n    # Save individual summaries\n    summaries_file = os.path.join(output_dir, f"summaries_{timestamp}.txt")\n    with open(summaries_file, "w") as f:\n        for i, summary in enumerate(summaries):\n            f.write(f"Result {i+1}: {search_results[i][\'title\']}\\n")\n            f.write(f"URL: {search_results[i][\'link\']}\\n")\n            f.write(f"{summary}\\n\\n")\n    \n    # Save final summary\n    final_summary_file = os.path.join(output_dir, f"final_summary_{timestamp}.txt")\n    with open(final_summary_file, "w") as f:\n        f.write(f"Search Query: {query}\\n\\n")\n        f.write(final_summary)\n    \n    print(f"Results saved to {output_dir}/")\n    return {\n        "search_results": search_results_file,\n        "summaries": summaries_file,\n        "final_summary": final_summary_file,\n        "screenshots": screenshots\n    }\n\ndef main():\n    """Main function to run the search tool."""\n    # Parse arguments\n    args = parse_arguments()\n    \n    # Process keywords into a search query\n    search_query = " ".join(args.keywords)\n    print(f"Searching for: {search_query}")\n    \n    # Set output directory\n    output_dir = args.output_dir if args.output_dir else RESULTS_DIR\n    \n    # Create temp directory for screenshots\n    temp_dir = create_temp_directory()\n    \n    try:\n        # Search Google API\n        search_results = search_google_api(search_query, num_results=args.num_results)\n        print(f"Found {len(search_results)} results")\n        \n        # Take screenshots of each result\n        screenshots = []\n        for i, result in enumerate(search_results):\n            print(f"Capturing screenshot for result {i+1}: {result[\'title\']}")\n            try:\n                # Generate filename based on search result\n                filename = f"result_{i+1}_{int(time.time())}.png"\n                output_path = os.path.join(temp_dir, filename)\n                \n                # Capture screenshot\n                screenshot_path = capture_webpage(result[\'link\'], output_file=output_path)\n                screenshots.append(screenshot_path)\n                print(f"Screenshot saved: {screenshot_path}")\n                \n            except Exception as e:\n                print(f"Error capturing screenshot for {result[\'link\']}: {str(e)}")\n                screenshots.append(None)\n        \n        # Analyze screenshots with LLM\n        summaries = []\n        for i, (result, screenshot) in enumerate(zip(search_results, screenshots)):\n            if screenshot:\n                print(f"Analyzing screenshot for result {i+1}")\n                prompt = prepare_prompt_for_screenshot(\n                    result[\'link\'], \n                    result[\'title\'], \n                    result.get(\'snippet\', \'No snippet available\')\n                )\n                \n                # Send to LLM\n                summary = send_to_llm(\n                    prompt=prompt,\n                    image_path=screenshot,\n                    provider=args.provider,\n                    model=args.model\n                )\n                \n                summaries.append(summary)\n                print(f"Analysis complete for result {i+1}")\n            else:\n                summaries.append("Screenshot capture failed for this result.")\n        \n        # Create final summary\n        print("Creating final summary...")\n        final_prompt = prepare_summary_prompt(search_query, summaries)\n        final_summary = send_to_llm(\n            prompt=final_prompt,\n            provider=args.provider,\n            model=args.model\n        )\n        \n        print("\\n" + "="*50)\n        print("FINAL SUMMARY")\n        print("="*50)\n        print(final_summary)\n        print("="*50)\n        \n        # Save results if requested\n        if args.save:\n            saved_files = save_results(\n                search_query,\n                search_results,\n                screenshots,\n                summaries,\n                final_summary,\n                output_dir\n            )\n            print(f"Results saved to {saved_files[\'final_summary\']}")\n        \n    except Exception as e:\n        print(f"Error: {str(e)}")\n        return 1\n    \n    return 0\n\nif __name__ == "__main__":\n    sys.exit(main())\n```\n\nNow let me create the `search_utils.py` file that contains helper functions for Google Search API integration:\n\n```python\n#!/usr/bin/env python3\n\nimport os\nimport json\nimport time\nimport tempfile\nfrom pathlib import Path\nimport requests\n\ndef load_config():\n    """Load configuration from config.json file."""\n    config_path = Path("config.json")\n    if not config_path.exists():\n        raise FileNotFoundError("config.json not found. Please create a config file with Google API keys.")\n    \n    with open(config_path, "r") as f:\n        config = json.load(f)\n    \n    # Check if required keys exist\n    if "google_api_key" not in config or "google_cx" not in config:\n        raise KeyError("Missing required Google API keys in config.json. Please add \'google_api_key\' and \'google_cx\'.")\n    \n    return config'}, {'role': 'user', 'content': 'The last generation was cut off. Please continue generation.'}, {'role': 'assistant', 'content': 'Here\'s the implementation of `search_utils.py` that will work with your existing files:\n\n```python\n#!/usr/bin/env python3\n\nimport os\nimport json\nimport time\nimport tempfile\nfrom pathlib import Path\nimport requests\n\ndef load_config():\n    """Load configuration from config.json file."""\n    config_path = Path("config.json")\n    if not config_path.exists():\n        raise FileNotFoundError("config.json not found. Please create a config file with Google API keys.")\n    \n    with open(config_path, "r") as f:\n        config = json.load(f)\n    \n    # Check if required keys exist\n    if "google_api_key" not in config or "google_cx" not in config:\n        raise KeyError("Missing required Google API keys in config.json. Please add \'google_api_key\' and \'google_cx\'.")\n    \n    return config\n\ndef process_keywords(keywords):\n    """Process a list of keywords into a search query string."""\n    if isinstance(keywords, list):\n        return " ".join(keywords)\n    return str(keywords)\n\ndef create_temp_directory():\n    """Create a temporary directory for storing screenshots."""\n    temp_dir = os.path.join(tempfile.gettempdir(), f"search_screenshots_{int(time.time())}")\n    os.makedirs(temp_dir, exist_ok=True)\n    return temp_dir\n\ndef search_google_api(query, num_results=5):\n    """\n    Search Google using the Google Custom Search JSON API.\n    \n    Args:\n        query (str): The search query\n        num_results (int): Number of results to return (max 10)\n        \n    Returns:\n        list: List of search result dictionaries with title, link, and snippet\n    """\n    # Load API keys from config\n    config = load_config()\n    api_key = config["google_api_key"]\n    cx = config["google_cx"]\n    \n    # Build the API URL\n    base_url = "https://www.googleapis.com/customsearch/v1"\n    params = {\n        "key": api_key,\n        "cx": cx,\n        "q": query,\n        "num": min(num_results, 10),  # Google API limits to 10 results per request\n    }\n    \n    try:\n        # Make the API request\n        response = requests.get(base_url, params=params)\n        response.raise_for_status()  # Raise an exception for HTTP errors\n        \n        # Parse the response\n        search_data = response.json()\n        \n        # Extract the search results\n        if "items" not in search_data:\n            print("No search results found.")\n            return []\n        \n        results = []\n        for item in search_data["items"]:\n            result = {\n                "title": item.get("title", ""),\n                "link": item.get("link", ""),\n                "snippet": item.get("snippet", ""),\n                "displayLink": item.get("displayLink", "")\n            }\n            results.append(result)\n        \n        return results[:num_results]\n        \n    except requests.exceptions.RequestException as e:\n        print(f"Error making Google Search API request: {str(e)}")\n        raise\n    except (KeyError, ValueError) as e:\n        print(f"Error parsing Google Search API response: {str(e)}")\n        raise\n\ndef filter_search_results(results, exclude_domains=None):\n    """\n    Filter search results to exclude specific domains.\n    \n    Args:\n        results (list): List of search result dictionaries\n        exclude_domains (list): List of domains to exclude\n        \n    Returns:\n        list: Filtered list of search results\n    """\n    if not exclude_domains:\n        return results\n    \n    filtered_results = []\n    for result in results:\n        domain = result.get("displayLink", "")\n        if not any(excluded in domain for excluded in exclude_domains):\n            filtered_results.append(result)\n    \n    return filtered_results\n\ndef format_search_results(results):\n    """\n    Format search results for display.\n    \n    Args:\n        results (list): List of search result dictionaries\n        \n    Returns:\n        str: Formatted string of search results\n    """\n    if not results:\n        return "No results found."\n    \n    formatted = []\n    for i, result in enumerate(results, 1):\n        formatted.append(f"{i}. {result[\'title\']}")\n        formatted.append(f"   URL: {result[\'link\']}")\n        formatted.append(f"   {result[\'snippet\']}")\n        formatted.append("")\n    \n    return "\\n".join(formatted)\n\ndef save_search_results(results, output_file):\n    """\n    Save search results to a JSON file.\n    \n    Args:\n        results (list): List of search result dictionaries\n        output_file (str): Path to the output file\n        \n    Returns:\n        str: Path to the saved file\n    """\n    with open(output_file, "w") as f:\n        json.dump(results, f, indent=2)\n    \n    return output_file\n\nif __name__ == "__main__":\n    # Example usage\n    query = "python web scraping tutorial"\n    results = search_google_api(query, num_results=5)\n    print(format_search_results(results))\n```\n\nThis implementation provides the following functionality:\n\n1. `load_config()` - Loads Google API keys from config.json\n2. `process_keywords()` - Converts keywords to a search query string\n3. `create_temp_directory()` - Creates a temporary directory for screenshots\n4. `search_google_api()` - Makes requests to Google Custom Search API\n5. `filter_search_results()` - Filters results to exclude specific domains\n6. `format_search_results()` - Formats search results for display\n7. `save_search_results()` - Saves results to a JSON file\n\nThe file can be imported into your `search_tool.py` and used for the Google Search API integration. It handles loading API keys, making requests, and processing search results.'}]
+No JSON format detected in response, saving as regular response
+
+==================================================
+RESPONSE:
+==================================================
+{
+  "text": "# Добавление поддержки Ollama в composer.py\n\nПривет! Сейчас реализую поддержку Ollama как провайдера в `composer.py`. Ollama - это отличный инструмент для локального запуска LLM моделей, и его интеграция расширит возможности вашего приложения.\n\nВ текущей реализации `composer.py` уже поддерживает три провайдера: OpenAI, Anthropic и OpenRouter. Добавим четвертый - Ollama.\n\n## Анализ текущей структуры\n\nСейчас в `composer.py` есть следующий паттерн для каждого провайдера:\n1. Загрузка API ключа из конфигурации\n2. Инициализация клиента провайдера\n3. Обработка запросов в маршруте `/api/generate`\n4. Отображение доступных провайдеров в `/api/health`\n\nOllama обычно запускается локально и не требует API ключа, но для гибкости мы добавим возможность указать URL Ollama API.\n\n## План изменений\n\n1. Добавить поддержку URL для Ollama в конфигурации\n2. Реализовать клиент для Ollama\n3. Добавить обработку запросов к Ollama в маршрут `/api/generate`\n4. Обновить маршрут `/api/health`\n5. Обновить парсер аргументов в `search_tool.py` для поддержки Ollama\n\n## Реализация\n",
+  "patch": "diff --git a/composer.py b/composer.py\nindex 1c6e5aa..e9c72d4 100644\n--- a/composer.py\n+++ b/composer.py\n@@ -4,6 +4,7 @@ import time\n import base64\n from typing import Dict, Any, Optional, List\n from flask import Flask, request, jsonify\n+import requests\n from openai import OpenAI\n from anthropic import Anthropic\n \n@@ -18,12 +19,14 @@ config = load_config()\n openai_api_key = config.get(\"openai_api_key\")\n anthropic_api_key = config.get(\"anthropic_api_key\")\n openrouter_api_key = config.get(\"openrouter_api_key\")\n+ollama_api_url = config.get(\"ollama_api_url\", \"http://localhost:11434\")\n \n # Initialize Clients\n openai_client = None\n anthropic_client = None\n openrouter_client = None\n \n+# Ollama doesn't need a client initialization, we'll use requests directly\n if openai_api_key:\n     openai_client = OpenAI(api_key=openai_api_key)\n \n@@ -37,10 +40,11 @@ if openrouter_api_key:\n def generate():\n     data = request.json\n     model = data.get('model', 'gpt-4o')\n-    messages = data.get('messages', [])\n+    messages = data.get('messages', []) \n     max_tokens = data.get('max_tokens', 4000)\n     temperature = data.get('temperature', 0.7)\n     provider = data.get('provider', 'openrouter')  # Default to OpenAI if not specified\n+    stream = data.get('stream', False)  # Add support for streaming responses\n     \n     try:\n         if provider == 'openai' and openai_client:\n@@ -82,6 +86,51 @@ def generate():\n                 'model': model,\n                 'provider': 'openrouter'\n             })\n+        elif provider == 'ollama':\n+            # Process messages for Ollama format\n+            ollama_messages = []\n+            \n+            # Handling images for Ollama\n+            has_images = False\n+            for msg in messages:\n+                content = msg.get(\"content\", \"\")\n+                \n+                # Check if content is a list (might contain images)\n+                if isinstance(content, list):\n+                    text_parts = []\n+                    for part in content:\n+                        if isinstance(part, dict):\n+                            # Handle image_url type content\n+                            if part.get(\"type\") == \"image_url\":\n+                                has_images = True\n+                                # For now, we'll skip images as Ollama has limited multimodal support\n+                                # Future: implement image handling for supported models\n+                                text_parts.append(\"[Image content not supported in this Ollama model]\")\n+                            # Add other content types as text\n+                            elif \"text\" in part:\n+                                text_parts.append(part[\"text\"])\n+                        elif isinstance(part, str):\n+                            text_parts.append(part)\n+                    ollama_messages.append({\"role\": msg[\"role\"], \"content\": \" \".join(text_parts)})\n+                else:\n+                    # Simple text message\n+                    ollama_messages.append({\"role\": msg[\"role\"], \"content\": content})\n+            \n+            # Warn if images were skipped\n+            if has_images:\n+                print(\"Warning: Images in messages were skipped for Ollama request\")\n+            \n+            # Prepare Ollama API request\n+            ollama_data = {\n+                \"model\": model,\n+                \"messages
+[1m[7m%[27m[1m[0m                                                                  
+ 
+
+[0m[27m[24m[J(reich) steppe@Mac reich % [K[?2004hjjkj  jjkj  ggti g git ehc   checkout [?2004l
+
+[1m[7m%[27m[1m[0m                                                                  
+ 
+
+[0m[27m[24m[J(reich) steppe@Mac reich % [K[?2004hl ggit branch[?2004l
+
+[?1h=
+  client_server[m[m
+  feature/search_tool_fix[m[m
+* [32mmain[m[m
+  patcher[m[m
+  reverted_gen[m[m
+
+[K[?1l>[1m[7m%[27m[1m[0m                                                                  
+ 
+
+[0m[27m[24m[J(reich) steppe@Mac reich % [K[?2004hggit checkotu   ut rve  evertt ed_gen[?2004l
+
+exclude.txt: needs merge
+error: you need to resolve your current index first
+[1m[7m%[27m[1m[0m                                                                  
+ 
+
+[0m[27m[24m[J(reich) steppe@Mac reich % [K[?2004hggit status[?2004l
+
+On branch main
+Your branch is ahead of 'origin/main' by 2 commits.
+  (use "git push" to publish your local commits)
+
+Unmerged paths:
+  (use "git restore --staged <file>..." to unstage)
+  (use "git add <file>..." to mark resolution)
+	[31mboth modified:   exclude.txt[m
+
+no changes added to commit (use "git add" and/or "git commit -a")
+[1m[7m%[27m[1m[0m                                                                  
+ 
+
+[0m[27m[24m[J(reich) steppe@Mac reich % [K[?2004hggit er  com  heckout        add ex
+
+[Jexample.config.json  exclude.txtM[0m[27m[24m
+[27Cgit add ex[Kclude.txt[1m [0m[0m [?2004l
+
+[J[1m[7m%[27m[1m[0m                                                                  
+ 
+
+[0m[27m[24m[J(reich) steppe@Mac reich % [K[?2004hggit commit -m "some exclude changes"[?2004l
+
+[main a0870b4e] some exclude changes
+ 1 file changed, 13 insertions(+), 2 deletions(-)
+[1m[7m%[27m[1m[0m                                                                  
+ 
+
+[0m[27m[24m[J(reich) steppe@Mac reich % [K[?2004hggit commit -m "some exclude changes"[32Dadd exclude.txt                 [17D[15Dstatus         [9Dcheckout reverted_gen[?2004l
+
+Switched to branch 'reverted_gen'
+[1m[7m%[27m[1m[0m                                                                  
+ 
+
+[0m[27m[24m[J(reich) steppe@Mac reich % [K[?2004hgit checkout reverted_gen
+
+# Content of conductor.py:
+import os
+import time
+import argparse
+from PIL import Image
+import io
+import requests
+import json
+import sys
+import base64
+from pathlib import Path
+from mimetypes import guess_type
+import re
+import glob
+import subprocess
+
+# Import the diarize module from the current project
+import diarize
+# import utility to 
+from url_fetch import capture_webpage
+
+# Constants
+DIALOGUE_DIR = "dialogue/"
+PREAMBLE_FILE = "preamble.txt"
+EXCLUDE_FILE = "exclude.txt"
+GENERATED_DIR = "generated/"
+SERVER_URL = "http://localhost:5555/api"  # Default server URL
+
+def get_epoch_time():
+    return str(int(time.time()))
+
+def encode_image(image_path):
+    mime_type, _ = guess_type(image_path)
+    if mime_type is None:
+        mime_type = 'application/octet-stream'
+
+    with open(image_path, "rb") as image_file:
+        base64_encoded_data = base64.b64encode(image_file.read()).decode('utf-8')
+    return f"data:{mime_type};base64,{base64_encoded_data}"
+
+def process_image(image_path, max_height=7999):
+    with Image.open(image_path) as img:
+        width, height = img.size
+        
+        # Check if image needs to be split
+        if height > width * 4/3 and height > max_height:
+            pieces = []
+            for i in range(0, height, max_height):
+                box = (0, i, width, min(i+max_height, height))
+                piece = img.crop(box)
+                
+                # Convert piece to base64
+                buffer = io.BytesIO()
+                piece.save(buffer, format="PNG")
+                encoded_piece = base64.b64encode(buffer.getvalue()).decode('utf-8')
+                pieces.append(f"data:image/png;base64,{encoded_piece}")
+            
+            return pieces
+        else:
+            # If image doesn't need splitting, return it as is
+            return [encode_image(image_path)]
+
+def save_prompt(prompt_text, final_context):
+    epoch_time = get_epoch_time()
+    prompt_file = os.path.join(DIALOGUE_DIR, f"{epoch_time}-prompt.txt")
+    context_file = os.path.join(DIALOGUE_DIR, f"{epoch_time}-context.txt")
+    
+    try:
+        with open(prompt_file, 'w') as f:
+            f.write(prompt_text)
+
+        with open(context_file, 'w') as f:
+            f.write(final_context)
+
+    except Exception as e:
+        print(f"Error saving files: {e}")
+    
+    return epoch_time, prompt_file, context_file
+
+def load_preamble():
+    with open(PREAMBLE_FILE, 'r') as f:
+        return f.read().strip()
+
+def load_exclusions():
+    if os.path.exists(EXCLUDE_FILE):
+        with open(EXCLUDE_FILE, 'r') as f:
+            return [line.strip() for line in f if line.strip()]
+    return []
+
+def generate_directory_structure(root_dir, exclude_file):
+    exclude_list = []
+    if os.path.exists(exclude_file):
+        with open(exclude_file, 'r') as f:
+            exclude_list = [line.strip() for line in f.readlines()]
+
+    # Construct the tree command with excludes
+    exclude_params = []
+    for item in exclude_list:
+        exclude_params.append(f"-I '{item}'")
+
+    exclude_str = ' '.join(exclude_params)
+    command = f"tree {root_dir} {exclude_str} --prune"
+    
+    # Execute the tree command
+    result = subprocess.run(command, shell=True, capture_output=True, text=True)
+    
+    return result.stdout
+
+def gather_context(exclusions):
+    # Generate the directory structure
+    dir_structure = generate_directory_structure('.', EXCLUDE_FILE)
+    context = f"Directory Structure:\n{dir_structure}"
+    
+    all_files = [f for f in glob.glob("**/*", recursive=True) if os.path.isfile(f)]
+    exclude_files = []
+    exclude_dirs = []
+    for pattern in exclusions:
+        if '.' in pattern:
+            exclude_files.append(pattern)
+        else:
+            exclude_dirs.append(pattern)
+
+    # Append contents of files to the context, considering exclusions
+    for file in all_files:
+        if any(file.startswith(excluded_dir) for excluded_dir in exclude_dirs):
+            continue
+        if any(glob.fnmatch.fnmatch(file, pattern) for pattern in exclude_files):
+            continue
+        with open(file, 'r', errors="ignore") as f:
+            context += f"\n\n# Content of {file}:\n"
+            context += f.read()
+    return context
+
+def gather_message_history():
+    files = sorted(glob.glob(os.path.join(DIALOGUE_DIR, "*.txt")), key=os.path.getmtime)
+    summaries = [f for f in files if "summary" in f]
+    prompts = [f for f in files if "prompt" in f]
+    responses = [f for f in files if "response" in f]
+
+    message_history = []
+
+    if summaries:
+        with open(summaries[-1], 'r') as f:
+            message_history.append({"role": "assistant", "content": f.read().strip()})
+
+    for p, r in zip(prompts, responses):
+        with open(p, 'r') as f:
+            message_history.append({"role": "user", "content": f.read().strip()})
+        with open(r, 'r') as f:
+            message_history.append({"role": "assistant", "content": f.read().strip()})
+
+    return message_history
+
+def send_request_to_server(prompt, image_paths=None, server_url=SERVER_URL, provider="openrouter", model="claude-3-7-sonnet-20250219"):
+    message_history = gather_message_history()
+    
+    if image_paths:
+        for image_path in image_paths:
+            image_pieces = process_image(image_path)
+            for piece in image_pieces:
+                if provider == "anthropic":
+                    message_history.append({
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": "image/png",
+                                    "data": piece.split(",", 1)[1]
+                                }
+                            }
+                        ]
+                    })
+                else:
+                    message_history.append({
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": piece
+                                }
+                            }
+                        ]
+                    })
+    
+    # Add the text prompt last
+    message_history.append({"role": "user", "content": prompt})
+
+    # Prepare request data
+    request_data = {
+        "messages": message_history,
+        "max_tokens": 1500,
+        "temperature": 0.7,
+        "provider": provider,
+        "model": model
+    }
+    
+    # Send request to server
+    try:
+        response = requests.post(
+            f"{server_url}/generate",
+            json=request_data,
+            headers={"Content-Type": "application/json"}
+        )
+        
+        # Handle response
+        if response.status_code == 200:
+            result = response.json()
+            if result.get("success", False):
+                return result.get("content", "")
+            else:
+                error_msg = result.get("error", "Unknown error")
+                raise Exception(f"Server error: {error_msg}")
+        else:
+            raise Exception(f"HTTP error: {response.status_code} - {response.text}")
+            
+    except requests.exceptions.RequestException as e:
+        raise Exception(f"Connection error: {str(e)}")
+
+def guess_image_mime_type(encoded_image):
+    """Guess the MIME type of the image from the data URL"""
+    if encoded_image.startswith("data:image/jpeg"):
+        return "image/jpeg"
+    elif encoded_image.startswith("data:image/png"):
+        return "image/png"
+    elif encoded_image.startswith("data:image/gif"):
+        return "image/gif"
+    elif encoded_image.startswith("data:image/webp"):
+        return "image/webp"
+    else:
+        return "application/octet-stream"  # Default to binary data if unknown
+    
+def main():
+    """Main function to run the Reich client."""
+    Path(DIALOGUE_DIR).mkdir(exist_ok=True)
+    
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description="Reich client for AI text generation")
+    parser.add_argument('-f', '--file', default='prompt', help='File path to read prompt from')
+    parser.add_argument("-i", "--images", nargs='+', required=False, help="Image files to send along with the prompt")
+    parser.add_argument("-u", "--urls", nargs='+', required=False, help="URLs to capture screenshots from")
+    parser.add_argument("-s", "--server", default=SERVER_URL, help=f"Server URL (default: {SERVER_URL})")
+    parser.add_argument("-p", "--provider", default="openrouter", choices=["auto", "openai", "openrouter", "anthropic"])
+    parser.add_argument("-m", "--model", default="anthropic/claude-3.7-sonnet", help="Model to use")
+
+    args = parser.parse_args()
+    
+    # Process user input
+    if args.file:
+        with open(os.path.expanduser(args.file), 'r') as file:
+            user_prompt = file.read()
+    else:
+        user_prompt = input("\nEnter your prompt: ")
+    
+    # Capture screenshots if URLs are provided
+    captured_images = []
+    if args.urls:
+        for url in args.urls:
+            screenshot_path = capture_webpage(url)
+            captured_images.append(screenshot_path)
+    
+    # Combine captured screenshots with provided images
+    image_paths = (args.images or []) + captured_images
+    
+    # Load context
+    preamble = load_preamble() if os.path.exists(PREAMBLE_FILE) else ""
+    exclusions = load_exclusions()
+    context = gather_context(exclusions)
+    
+    # Prepare final prompt with context
+    final_prompt = f"{preamble}\n\n{user_prompt}\n\n{context}"
+    epoch_time, prompt_file, context_file = save_prompt(user_prompt, final_context=final_prompt)
+
+    try:
+        # Send request to AI server
+        response_text = send_request_to_server(
+            prompt=final_prompt, 
+            image_paths=image_paths,
+            server_url=args.server,
+            provider=args.provider,
+            model=args.model
+        )
+        
+        # Save the response
+        response_file = os.path.join(DIALOGUE_DIR, f"{epoch_time}-response.txt")
+        with open(response_file, 'w') as f:
+            f.write(response_text)
+        
+        # Extract and save code blocks if present
+        code_blocks = re.findall(r'```(.*?)```', response_text, re.DOTALL)
+        if code_blocks:
+            Path(GENERATED_DIR).mkdir(exist_ok=True)
+            for i, code_block in enumerate(code_blocks):
+                code_block = code_block.strip()
+                if code_block.startswith('python'):
+                    extension = '.py'
+                    content = code_block.split('\n', 1)[1] if '\n' in code_block else code_block
+                elif code_block.startswith('javascript'):
+                    extension = '.js'
+                    content = code_block.split('\n', 1)[1] if '\n' in code_block else code_block
+                else:
+                    extension = '.txt'
+                    content = code_block
+                    
+                filename = os.path.join(GENERATED_DIR, f"{epoch_time}_{i}{extension}")
+                with open(filename, 'w') as file:
+                    file.write(content)
+        
+        # Print the response
+        print("\n" + "="*50)
+        print("RESPONSE:")
+        print("="*50)
+        print(response_text)
+        
+        # Update conversation summary
+        if 'diarize' in sys.modules:
+            diarize.summarize_conversation()
+            
+    except Exception as e:
+        print(f"Error in processing: {e}")
+        return 1
+        
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())
+
+
+# Content of prompt:
+Let's add support for using ollama as a provider in compser.py
+
+
+# Content of example.config.json:
+{
+  "openai_api_key": "",
+  "anthropic_api_key": "",
+  "openrouter_api_key": ""
+}
+
+
+# Content of search.py:
+# search.py
+import os
+import sys
+import argparse
+from pathlib import Path
+import glob
+import json
+from datetime import datetime
+from typing import List, Dict, Any
+
+# RAG components
+from langchain_community.embeddings import OpenAIEmbeddings, HuggingFaceEmbeddings
+from langchain_community.vectorstores import FAISS
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_core.documents import Document
+
+def load_config():
+    """Load API keys from config file"""
+    with open('config.json', 'r') as f:
+        return json.load(f)
+
+def initialize_embeddings(config):
+    """Initialize embeddings model based on available API keys"""
+    if config.get("openai_api_key"):
+        return OpenAIEmbeddings(api_key=config.get("openai_api_key"))
+    else:
+        # Fallback to local model that doesn't require API keys
+        return HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+
+def load_documents(history_dir: str) -> List[Document]:
+    """Load all text files from history directory"""
+    documents = []
+    history_path = Path(history_dir)
+    
+    if not history_path.exists():
+        print(f"Error: Directory '{history_dir}' does not exist")
+        sys.exit(1)
+    
+    # Find all text files recursively
+    file_paths = glob.glob(os.path.join(history_dir, "**/*.txt"), recursive=True)
+    
+    for file_path in file_paths:
+        try:
+            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                content = f.read()
+                
+            # Extract metadata from filename
+            filename = os.path.basename(file_path)
+            file_type = "unknown"
+            timestamp = None
+            
+            # Parse timestamp from filenames like "1234567890-prompt.txt"
+            parts = filename.split('-')
+            if len(parts) >= 2 and parts[0].isdigit():
+                try:
+                    timestamp = datetime.fromtimestamp(int(parts[0]))
+                    file_type = parts[1].split('.')[0]  # prompt, response, etc.
+                except:
+                    pass
+                
+            doc = Document(
+                page_content=content,
+                metadata={
+                    "source": file_path,
+                    "filename": filename,
+                    "type": file_type,
+                    "timestamp": timestamp
+                }
+            )
+            documents.append(doc)
+            
+        except Exception as e:
+            print(f"Error reading {file_path}: {e}")
+    
+    print(f"Loaded {len(documents)} documents from {history_dir}")
+    return documents
+
+def create_or_load_index(documents: List[Document], embeddings, index_name: str = "history_index"):
+    """Create or load vector index"""
+    # Create chunks for better retrieval
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
+    chunks = text_splitter.split_documents(documents)
+    
+    # Check if index already exists
+    if os.path.exists(index_name) and os.path.isdir(index_name):
+        print(f"Loading existing index from {index_name}")
+        try:
+            vector_db = FAISS.load_local(index_name, embeddings)
+            return vector_db
+        except Exception as e:
+            print(f"Error loading index: {e}")
+            print("Creating new index...")
+    
+    # Create new index
+    print(f"Creating new index with {len(chunks)} chunks")
+    vector_db = FAISS.from_documents(chunks, embeddings)
+    
+    # Save index
+    vector_db.save_local(index_name)
+    return vector_db
+
+def search_documents(query: str, vector_db, k: int = 5) -> List[Document]:
+    """Search for relevant documents"""
+    results = vector_db.similarity_search(query, k=k)
+    return results
+
+def format_results(results: List[Document]) -> str:
+    """Format search results for display"""
+    output = []
+    
+    for i, doc in enumerate(results):
+        metadata = doc.metadata
+        source = metadata.get("source", "Unknown source")
+        timestamp = metadata.get("timestamp")
+        doc_type = metadata.get("type", "unknown")
+        
+        # Format timestamp if available
+        time_str = ""
+        if timestamp:
+            time_str = f" ({timestamp.strftime('%Y-%m-%d %H:%M:%S')})"
+        
+        # Prepare header
+        header = f"\n[{i+1}] {source}{time_str} - Type: {doc_type}"
+        output.append(header)
+        output.append("-" * len(header))
+        
+        # Add content preview (truncated if too long)
+        content = doc.page_content
+        if len(content) > 500:
+            content = content[:500] + "..."
+        output.append(content)
+    
+    return "\n".join(output)
+
+def main():
+    parser = argparse.ArgumentParser(description="Search through history documents using RAG")
+    parser.add_argument("query", help="Search query")
+    parser.add_argument("--dir", default="dialogue", help="Directory containing history documents")
+    parser.add_argument("--rebuild", action="store_true", help="Force rebuild of the search index")
+    parser.add_argument("--results", type=int, default=5, help="Number of results to return")
+    args = parser.parse_args()
+    
+    # Initialize
+    config = load_config()
+    embeddings = initialize_embeddings(config)
+    
+    # Load documents
+    documents = load_documents(args.dir)
+    
+    # Create or load vector index
+    index_name = "history_index"
+    if args.rebuild and os.path.exists(index_name):
+        import shutil
+        print(f"Rebuilding index - removing {index_name}")
+        shutil.rmtree(index_name)
+    
+    vector_db = create_or_load_index(documents, embeddings, index_name)
+    
+    # Search for relevant documents
+    results = search_documents(args.query, vector_db, k=args.results)
+    
+    # Format and print results
+    if results:
+        print(f"\nFound {len(results)} relevant documents for query: '{args.query}'\n")
+        formatted_results = format_results(results)
+        print(formatted_results)
+    else:
+        print(f"No relevant documents found for query: '{args.query}'")
+    
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())
+
+
+# Content of !:
+#! python3.12
+
+import os
+import sys
+import argparse
+import json
+import base64
+import requests
+from pathlib import Path
+import time
+
+# Import from existing modules
+from url_fetch import capture_webpage
+from search_utils import (
+    process_keywords,
+    search_google_api,
+    load_config,
+    create_temp_directory
+)
+
+# Constants
+SERVER_URL = "http://localhost:5555/api"  # Composer.py server URL
+RESULTS_DIR = "search_results"  # Directory to store search results
+
+def parse_arguments():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(description="Search tool with screenshot capture and LLM summarization")
+    parser.add_argument("keywords", nargs="+", help="Keywords to search for")
+    parser.add_argument("-n", "--num-results", type=int, default=5, 
+                        help="Number of search results to process (default: 5)")
+    parser.add_argument("-m", "--model", default="x-ai/grok-2-vision-1212", 
+                        help="LLM model to use for summarization")
+    parser.add_argument("-p", "--provider", default="openrouter", 
+                        choices=["openai", "anthropic", "openrouter"],
+                        help="AI provider to use")
+    parser.add_argument("-s", "--save", action="store_true", 
+                        help="Save search results and summaries")
+    parser.add_argument("-o", "--output-dir", 
+                        help="Directory to save results (default: search_results)")
+    return parser.parse_args()
+
+def encode_image(image_path):
+    """Encode image to base64 for sending to LLM."""
+    with open(image_path, "rb") as image_file:
+        return base64.b64encode(image_file.read()).decode("utf-8")
+
+def prepare_prompt_for_screenshot(url, title, snippet):
+    """Prepare a prompt for the LLM to analyze a screenshot."""
+    return f"""Please analyze this screenshot of search result: {title}
+
+URL: {url}
+
+Context from search snippet: {snippet}
+
+Provide a concise summary of what you see in the screenshot. Focus on the main content, key information, and how it relates to the search query. Ignore ads, navigation elements, and other UI components unless they're relevant to understanding the content."""
+
+def prepare_summary_prompt(search_query, individual_summaries):
+    """Prepare a prompt for the LLM to create a final summary of all results."""
+    summaries_text = "\n\n".join([f"Result {i+1}: {summary}" for i, summary in enumerate(individual_summaries)])
+    
+    return f"""You searched for: {search_query}
+
+Here are summaries of the top search results:
+
+{summaries_text}
+
+Please provide a comprehensive yet concise summary of these search results. Identify common themes, contradictions, and unique insights. Focus on answering the original search query based on the information available in these results."""
+
+def send_to_llm(prompt, image_path=None, server_url=SERVER_URL, provider="openai", model="gpt-4o"):
+    """Send a prompt and optional image to the LLM via composer.py server."""
+    messages = []
+    
+    # Add image if provided
+    if image_path:
+        image_base64 = encode_image(image_path)
+        
+        if provider == "anthropic":
+            messages.append({
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": image_base64
+                        }
+                    }
+                ]
+            })
+        else:  # OpenAI or OpenRouter format
+            messages.append({
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/png;base64,{image_base64}"
+                        }
+                    }
+                ]
+            })
+    
+    # Add text prompt
+    messages.append({"role": "user", "content": prompt})
+    
+    # Prepare request data
+    request_data = {
+        "messages": messages,
+        "max_tokens": 1000,
+        "temperature": 0.7,
+        "provider": provider,
+        "model": model
+    }
+    
+    # Send request to composer.py server
+    try:
+        response = requests.post(
+            f"{server_url}/generate",
+            json=request_data,
+            headers={"Content-Type": "application/json"}
+        )
+        
+        # Handle response
+        if response.status_code == 200:
+            result = response.json()
+            if result.get("success", False):
+                return result.get("content", "")
+            else:
+                error_msg = result.get("error", "Unknown error")
+                raise Exception(f"Server error: {error_msg}")
+        else:
+            raise Exception(f"HTTP error: {response.status_code} - {response.text}")
+            
+    except requests.exceptions.RequestException as e:
+        raise Exception(f"Connection error: {str(e)}")
+
+def save_results(query, search_results, screenshots, summaries, final_summary, output_dir):
+    """Save search results, screenshots, and summaries to files."""
+    # Create output directory if it doesn't exist
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Generate timestamp for filenames
+    timestamp = int(time.time())
+    
+    # Save search results as JSON
+    search_results_file = os.path.join(output_dir, f"search_results_{timestamp}.json")
+    with open(search_results_file, "w") as f:
+        json.dump(search_results, f, indent=2)
+    
+    # Save individual summaries
+    summaries_file = os.path.join(output_dir, f"summaries_{timestamp}.txt")
+    with open(summaries_file, "w") as f:
+        for i, summary in enumerate(summaries):
+            f.write(f"Result {i+1}: {search_results[i]['title']}\n")
+            f.write(f"URL: {search_results[i]['link']}\n")
+            f.write(f"{summary}\n\n")
+    
+    # Save final summary
+    final_summary_file = os.path.join(output_dir, f"final_summary_{timestamp}.txt")
+    with open(final_summary_file, "w") as f:
+        f.write(f"Search Query: {query}\n\n")
+        f.write(final_summary)
+    
+    print(f"Results saved to {output_dir}/")
+    return {
+        "search_results": search_results_file,
+        "summaries": summaries_file,
+        "final_summary": final_summary_file,
+        "screenshots": screenshots
+    }
+
+def main():
+    """Main function to run the search tool."""
+    # Parse arguments
+    args = parse_arguments()
+    
+    # Process keywords into a search query
+    search_query = " ".join(args.keywords)
+    print(f"Searching for: {search_query}")
+    
+    # Set output directory
+    output_dir = args.output_dir if args.output_dir else RESULTS_DIR
+    
+    # Create temp directory for screenshots
+    temp_dir = create_temp_directory()
+    
+    try:
+        # Search Google API
+        search_results = search_google_api(search_query, num_results=args.num_results)
+        print(f"Found {len(search_results)} results")
+        
+        # Take screenshots of each result
+        screenshots = []
+        for i, result in enumerate(search_results):
+            print(f"Capturing screenshot for result {i+1}: {result['title']}")
+            try:
+                # Generate filename based on search result
+                filename = f"result_{i+1}_{int(time.time())}.png"
+                output_path = os.path.join(temp_dir, filename)
+                
+                # Capture screenshot
+                screenshot_path = capture_webpage(result['link'], output_file=output_path)
+                screenshots.append(screenshot_path)
+                print(f"Screenshot saved: {screenshot_path}")
+                
+            except Exception as e:
+                print(f"Error capturing screenshot for {result['link']}: {str(e)}")
+                screenshots.append(None)
+        
+        # Analyze screenshots with LLM
+        summaries = []
+        for i, (result, screenshot) in enumerate(zip(search_results, screenshots)):
+            if screenshot:
+                print(f"Analyzing screenshot for result {i+1}")
+                prompt = prepare_prompt_for_screenshot(
+                    result['link'], 
+                    result['title'], 
+                    result.get('snippet', 'No snippet available')
+                )
+                
+                # Send to LLM
+                summary = send_to_llm(
+                    prompt=prompt,
+                    image_path=screenshot,
+                    provider=args.provider,
+                    model=args.model
+                )
+                
+                summaries.append(summary)
+                print(f"Analysis complete for result {i+1}")
+            else:
+                summaries.append("Screenshot capture failed for this result.")
+        
+        # Create final summary
+        print("Creating final summary...")
+        final_prompt = prepare_summary_prompt(search_query, summaries)
+        final_summary = send_to_llm(
+            prompt=final_prompt,
+            provider=args.provider,
+            model=args.model
+        )
+        
+        print("\n" + "="*50)
+        print("FINAL SUMMARY")
+        print("="*50)
+        print(final_summary)
+        print("="*50)
+        
+        # Save results if requested
+        if args.save:
+            saved_files = save_results(
+                search_query,
+                search_results,
+                screenshots,
+                summaries,
+                final_summary,
+                output_dir
+            )
+            print(f"Results saved to {saved_files['final_summary']}")
+        
+    except Exception as e:
+        print(f"Error: {str(e)}")
+        return 1
+    
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())
+
+
+# Content of search_utils.py:
+#! python3.12
+
+import os
+import json
+import time
+import tempfile
+from pathlib import Path
+import requests
+
+def load_config():
+    """Load configuration from config.json file."""
+    config_path = Path("config.json")
+    if not config_path.exists():
+        raise FileNotFoundError("config.json not found. Please create a config file with Google API keys.")
+    
+    with open(config_path, "r") as f:
+        config = json.load(f)
+    
+    # Check if required keys exist
+    if "google_api_key" not in config or "google_cx" not in config:
+        raise KeyError("Missing required Google API keys in config.json. Please add 'google_api_key' and 'google_cx'.")
+    
+    return config
+
+
+def process_keywords(keywords):
+    """Process a list of keywords into a search query string."""
+    if isinstance(keywords, list):
+        return " ".join(keywords)
+    return str(keywords)
+
+def create_temp_directory():
+    """Create a temporary directory for storing screenshots."""
+    temp_dir = os.path.join(tempfile.gettempdir(), f"search_screenshots_{int(time.time())}")
+    os.makedirs(temp_dir, exist_ok=True)
+    return temp_dir
+
+def search_google_api(query, num_results=5):
+    """
+    Search Google using the Google Custom Search JSON API.
+    
+    Args:
+        query (str): The search query
+        num_results (int): Number of results to return (max 10)
+        
+    Returns:
+        list: List of search result dictionaries with title, link, and snippet
+    """
+    # Load API keys from config
+    config = load_config()
+    api_key = config["google_api_key"]
+    cx = config["google_cx"]
+    
+    # Build the API URL
+    base_url = "https://www.googleapis.com/customsearch/v1"
+    params = {
+        "key": api_key,
+        "cx": cx,
+        "q": query,
+        "num": min(num_results, 10),  # Google API limits to 10 results per request
+    }
+    
+    try:
+        # Make the API request
+        response = requests.get(base_url, params=params)
+        response.raise_for_status()  # Raise an exception for HTTP errors
+        
+        # Parse the response
+        search_data = response.json()
+        
+        # Extract the search results
+        if "items" not in search_data:
+            print("No search results found.")
+            return []
+        
+        results = []
+        for item in search_data["items"]:
+            result = {
+                "title": item.get("title", ""),
+                "link": item.get("link", ""),
+                "snippet": item.get("snippet", ""),
+                "displayLink": item.get("displayLink", "")
+            }
+            results.append(result)
+        
+        return results[:num_results]
+        
+    except requests.exceptions.RequestException as e:
+        print(f"Error making Google Search API request: {str(e)}")
+        raise
+    except (KeyError, ValueError) as e:
+        print(f"Error parsing Google Search API response: {str(e)}")
+        raise
+
+def filter_search_results(results, exclude_domains=None):
+    """
+    Filter search results to exclude specific domains.
+    
+    Args:
+        results (list): List of search result dictionaries
+        exclude_domains (list): List of domains to exclude
+        
+    Returns:
+        list: Filtered list of search results
+    """
+    if not exclude_domains:
+        return results
+    
+    filtered_results = []
+    for result in results:
+        domain = result.get("displayLink", "")
+        if not any(excluded in domain for excluded in exclude_domains):
+            filtered_results.append(result)
+    
+    return filtered_results
+
+def format_search_results(results):
+    """
+    Format search results for display.
+    
+    Args:
+        results (list): List of search result dictionaries
+        
+    Returns:
+        str: Formatted string of search results
+    """
+    if not results:
+        return "No results found."
+    
+    formatted = []
+    for i, result in enumerate(results, 1):
+        formatted.append(f"{i}. {result['title']}")
+        formatted.append(f"   URL: {result['link']}")
+        formatted.append(f"   {result['snippet']}")
+        formatted.append("")
+    
+    return "\n".join(formatted)
+
+def save_search_results(results, output_file):
+    """
+    Save search results to a JSON file.
+    
+    Args:
+        results (list): List of search result dictionaries
+        output_file (str): Path to the output file
+        
+    Returns:
+        str: Path to the saved file
+    """
+    with open(output_file, "w") as f:
+        json.dump(results, f, indent=2)
+    
+    return output_file
+
+if __name__ == "__main__":
+    # Example usage
+    query = "python web scraping tutorial"
+    results = search_google_api(query, num_results=5)
+    print(format_search_results(results))
+
+
+# Content of reich_log.tmp:
+
+
+# Content of patches/1741374768.patch:
+<unused for now>
+
+
+# Content of patches/1741377087.patch:
+<unused for now>
+
+
+# Content of patches/1741374726.patch:
+<unused for now>
+
+
+# Content of patches/1741395755.patch:
+<unused for now>
+
+
+# Content of search_results/summaries_1741483694.txt:
+Result 1: Understanding Onsen Culture | Japan Experience - Japan Rail Pass
+URL: https://www.japan-experience.com/plan-your-trip/to-know/understanding-japan/understanding-onsen-culture
+The screenshot is from a webpage titled "Understanding Onsen Culture | Japan Experience - Japan Rail Pass" with the URL provided. Here's a concise summary of the main content:
+
+1. **Introduction to Onsen Culture**: The article begins with an explanation of what an onsen is, describing it as a traditional Japanese hot spring where people bathe communally. It emphasizes the cultural significance and the long history of this practice in Japan.
+
+2. **Historical Context**: The section discusses the ancient origins of onsen, mentioning that people have been bathing in hot springs for thousands of years, which ties into the search snippet's mention of the practice being thousands of years old.
+
+3. **Etiquette and Rules**: There are detailed descriptions of the etiquette involved in visiting an onsen, such as washing oneself thoroughly before entering the bath, not soaking towels in the water, and maintaining silence or quiet conversation.
+
+4. **Types of Onsen**: The article highlights different types of onsens, including natural outdoor onsens, indoor onsens, and private onsens (kashikiri baths).
+
+5. **Health Benefits**: It explains the purported health benefits of onsen bathing, such as improving circulation, relieving stress, and aiding in skin health.
+
+6. **Cultural Significance**: There is a discussion on the cultural importance of onsens, including their role in social bonding and relaxation in Japanese society.
+
+7. **Visuals**: The page includes several images illustrating various onsens, both traditional and modern, enhancing the reader's understanding of the environments where this practice takes place.
+
+8. **Practical Information**: The article also provides practical advice for tourists, such as what to bring (like a small towel), what to expect, and considerations for tattoos (often a sensitive issue in Japan).
+
+The content directly relates to the search query by providing comprehensive information on onsen culture, including its historical roots, etiquette, types, and cultural significance, which aligns with the search snippet's focus on the traditional practice of communal bathing in hot springs.
+
+Result 2: The Culture Behind Japanese Onsen | Bokksu
+URL: https://www.bokksu.com/blogs/news/japanese-onsen
+The screenshot is of a blog post from Bokksu titled "The Culture Behind Japanese Onsen." Here is a concise summary of the main content and how it relates to the search query:
+
+**Main Content:**
+- **Title:** The Culture Behind Japanese Onsen
+- **Date:** August 17, 2022
+- **Content:** The article explains the concept of an onsen, which is a Japanese natural hot spring bath. It highlights that onsens are considered social activities, typically enjoyed in groups rather than alone. The post likely delves into the cultural significance, etiquette, and experience of visiting an onsen.
+
+**Key Information:**
+- The article emphasizes the communal aspect of onsens, contrasting them with solitary bathing activities.
+- It mentions that onsens are not just about relaxation but also about social interaction and cultural tradition.
+
+**Relation to Search Query:**
+- The search query "The Culture Behind Japanese Onsen | Bokksu" is directly addressed by the article, which provides an in-depth look into the cultural practices and social norms surrounding onsens in Japan. The context from the search snippet is reflected in the article's discussion of onsens as social, communal activities.
+
+Result 3: The Complete Guide to Onsens in Japan | Rakuten Travel
+URL: https://travel.rakuten.com/contents/usa/en-us/guide/complete-guide-onsens/
+The screenshot is from a webpage titled "The Complete Guide to Onsens in Japan" by Rakuten Travel. Here is a summary of the main content and key information:
+
+1. **Introduction to Onsens**:
+   - Onsens are natural hot springs in Japan, defined by their natural water source.
+   - The guide explains that onsens are not just about soaking in hot water but are a cultural experience.
+
+2. **What is an Onsen?**:
+   - Defines onsen as a place where natural hot spring water is used for bathing.
+   - Highlights the difference between onsens and sentos (public baths).
+
+3. **Types of Onsens**:
+   - Discusses various types of onsens, including rotenburo (outdoor baths), uchiyu (indoor baths), and mixed-gender baths.
+   - Mentions special onsens like those with themed baths or therapeutic properties.
+
+4. **Etiquette and Rules**:
+   - Provides guidance on onsen etiquette, such as washing before entering, no swimming, and no tattoos in some onsens.
+   - Discusses the importance of respecting the rules to maintain the cultural integrity of the experience.
+
+5. **Health Benefits**:
+   - Explains the health benefits of onsen bathing, including relaxation, improved circulation, and skin benefits.
+
+6. **Popular Onsen Destinations**:
+   - Lists some famous onsen areas in Japan like Hakone, Beppu, and Kusatsu, providing brief descriptions of each.
+
+7. **Practical Information**:
+   - Offers tips on what to bring, what to wear (usually nothing, but some onsens provide towels), and how to find onsens.
+   - Includes information on costs, accessibility, and how to book stays at onsen ryokan (traditional inns).
+
+8. **Cultural Significance**:
+   - Discusses the cultural importance of onsens in Japanese society, their role in relaxation, and social bonding.
+
+The content directly relates to the search query by providing comprehensive information on onsens, from their definition and types to etiquette, health benefits, and popular destinations. The date mentioned in the search snippet (Aug 30, 2023) indicates the guide is relatively up-to-date.
+
+
+
+# Content of search_results/search_results_1741483694.json:
+[
+  {
+    "title": "Understanding Onsen Culture | Japan Experience - Japan Rail Pass",
+    "link": "https://www.japan-experience.com/plan-your-trip/to-know/understanding-japan/understanding-onsen-culture",
+    "snippet": "Feb 8, 2013 ... Being naked with friends and strangers is a traditional practice in Japan. It happens every day in hot springs across Japan as it has for thousands of years.",
+    "displayLink": "www.japan-experience.com"
+  },
+  {
+    "title": "The Culture Behind Japanese Onsen | Bokksu",
+    "link": "https://www.bokksu.com/blogs/news/japanese-onsen",
+    "snippet": "Aug 17, 2022 ... An onsen is similar to a Japanese public bath. It's considered a social activity, not one that you attend alone. These natural hot spring baths\u00a0...",
+    "displayLink": "www.bokksu.com"
+  },
+  {
+    "title": "The Complete Guide to Onsens in Japan | Rakuten Travel",
+    "link": "https://travel.rakuten.com/contents/usa/en-us/guide/complete-guide-onsens/",
+    "snippet": "Aug 30, 2023 ... Basically, onsen means \"natural hot spring\" in Japanese, and what makes an onsen an \"onsen\" is its water source. In Japan, folks refer to the\u00a0...",
+    "displayLink": "travel.rakuten.com"
+  }
+]
+
+# Content of search_results/final_summary_1741483694.txt:
+Search Query: Japanese Onsen culture
+
+### Comprehensive Summary of Japanese Onsen Culture Based on Search Results
+
+**Common Themes:**
+
+1. **Historical and Cultural Significance**: All sources highlight the deep-rooted history of onsen culture, dating back thousands of years. Onsens are not merely places for bathing but are integral to Japanese social and cultural practices, providing relaxation and a sense of community.
+
+2. **Etiquette and Rules**: There is a consensus on the strict etiquette associated with onsens, including the necessity to wash thoroughly before entering, not soaking towels in the water, maintaining silence or quiet conversation, and the issue of tattoos, which can be contentious but generally require covering or might restrict access.
+
+3. **Types of Onsens**: Various types are mentioned across the results, such as rotenburo (outdoor), uchiyu (indoor), private (kashikiri), and mixed-gender baths, indicating a diversity in the onsen experience.
+
+4. **Health Benefits**: Each source discusses the health benefits of onsen bathing, including improved circulation, stress relief, and benefits for skin health, reinforcing the therapeutic aspect of this cultural practice.
+
+5. **Social Aspect**: Onsens are described as social activities, where the experience is often shared with others, enhancing social bonds. This communal aspect is particularly emphasized in the Bokksu article.
+
+6. **Practical Information for Visitors**: Guidance for tourists is provided, including what to bring (like a small towel), what to expect, and considerations for finding and using onsens, especially for foreigners.
+
+**Contradictions:**
+
+- There isn't a direct contradiction in the content; however, the emphasis varies slightly. For instance, while all mention etiquette, the depth of discussion on tattoo policies might differ, with some sources potentially being more lenient or informative about modern accommodations for tattooed visitors.
+
+**Unique Insights:**
+
+- **Japan Experience** provides a broader historical context and includes visual aids to enhance understanding, which might be particularly useful for visual learners or those new to the concept.
+- **Bokksu** uniquely focuses on the social nature of onsens, suggesting that the cultural experience is as much about the communal interaction as it is about the physical act of bathing.
+- **Rakuten Travel** offers a detailed guide with specific destinations like Hakone and Beppu, providing a practical guide for planning a visit, which isn't as emphasized in the other sources.
+
+**Answering the Original Search Query:**
+
+Based on the information from these results, Japanese Onsen culture is a multifaceted tradition with deep historical roots, serving as both a therapeutic and social activity. Onsens are places where:
+
+- **History and Tradition** are preserved, with practices that have evolved over millennia.
+- **Etiquette** is paramount, ensuring respect for others and the cultural practice.
+- **Health Benefits** are significant, making onsens popular for relaxation and wellness.
+- **Social Interaction** is encouraged, making the experience communal rather than solitary.
+- **Variety** exists in the types of onsens, catering to different preferences and settings, from natural outdoor baths to private indoor facilities.
+- **Practical Considerations** for visitors include understanding local customs, especially regarding tattoos, and preparation for what to expect in terms of facilities and behavior.
+
+This comprehensive understanding should provide a well-rounded view of Japanese onsen culture, fulfilling the intent of the search query by covering historical, cultural, practical, and social aspects.
+
+# Content of commands/1741374768.sh:
+#!/bin/bash
+
+cat > search_tool.py << 'EOF'
+#!/usr/bin/env python3
+
+import argparse
+import sys
+import urllib.parse
+
+
+def process_keywords(keywords):
+    """
+    Process a list of keywords for search.
+    
+    Args:
+        keywords (list): List of keyword strings
+        
+    Returns:
+        str: Processed keywords ready for search
+    """
+    # Remove any empty strings and join with spaces
+    processed = " ".join([k.strip() for k in keywords if k.strip()])
+    return processed
+
+
+def construct_search_url(query):
+    """
+    Construct a Google search URL from a query string.
+    
+    Args:
+        query (str): Search query string
+        
+    Returns:
+        str: Formatted Google search URL
+    """
+    encoded_query = urllib.parse.quote(query)
+    return f"https://www.google.com/search?q={encoded_query}"
+
+
+def main():
+    """
+    Main function to process command line arguments and run the search tool.
+    """
+    parser = argparse.ArgumentParser(description="Search tool that summarizes Google search results.")
+    parser.add_argument(
+        "keywords", 
+        nargs="+", 
+        help="Keywords to search for"
+    )
+    parser.add_argument(
+        "-n", "--num-results",
+        type=int,
+        default=5,
+        help="Number of results to summarize (default: 5)"
+    )
+    
+    args = parser.parse_args()
+    
+    # Process keywords into a search query
+    query = process_keywords(args.keywords)
+    search_url = construct_search_url(query)
+    
+    print(f"Search query: {query}")
+    print(f"Search URL: {search_url}")
+    print(f"Will summarize the first {args.num_results} results.")
+    
+    # The actual search and summarization will be implemented in Phase 2 and beyond
+    print("Search and summarization functionality will be implemented in future phases.")
+
+
+if __name__ == "__main__":
+    main()
+EOF
+chmod +x search_tool.py
+
+
+# Content of commands/1741374726.sh:
+#!/bin/bash
+
+echo 'def construct_search_query(keywords):
+    query = "+".join(keywords)
+    return f"https://www.google.com/search?q={query}"
+' > search_tool.py
+
+
+# Content of commands/1741377087.sh:
+#!/bin/bash
+
+cat > search_tool.py << 'EOF'
+#!/usr/bin/env python3
+
+import argparse
+import sys
+import os
+import urllib.parse
+import tempfile
+
+
+def process_keywords(keywords):
+    """
+    Process a list of keywords for search.
+    
+    Args:
+        keywords (list): List of keyword strings
+        
+    Returns:
+        str: Processed keywords ready for search
+    """
+    # Remove any empty strings and join with spaces
+    processed = " ".join([k.strip() for k in keywords if k.strip()])
+    return processed
+
+
+def construct_search_url(query):
+    """
+    Construct a Google search URL from a query string.
+    
+    Args:
+        query (str): Search query string
+        
+    Returns:
+        str: Formatted Google search URL
+    """
+    encoded_query = urllib.parse.quote(query)
+    return f"https://www.google.com/search?q={encoded_query}"
+
+
+def create_temp_directory():
+    """
+    Create a temporary directory to store screenshots.
+    
+    Returns:
+        str: Path to the temporary directory
+    """
+    temp_dir = tempfile.mkdtemp(prefix="search_tool_")
+    print(f"Created temporary directory for screenshots: {temp_dir}", file=sys.stderr)
+    return temp_dir
+
+
+def main():
+    """
+    Main function to process command line arguments and run the search tool.
+    """
+    parser = argparse.ArgumentParser(description="Search tool that summarizes Google search results.")
+    parser.add_argument(
+        "keywords", 
+        nargs="+", 
+        help="Keywords to search for"
+    )
+    parser.add_argument(
+        "-n", "--num-results",
+        type=int,
+        default=5,
+        help="Number of results to summarize (default: 5)"
+    )
+    parser.add_argument(
+        "-o", "--output-dir",
+        default=None,
+        help="Directory to save screenshots (default: temporary directory)"
+    )
+    
+    args = parser.parse_args()
+    
+    # Process keywords into a search query
+    query = process_keywords(args.keywords)
+    search_url = construct_search_url(query)
+    
+    # Create output directory if specified, otherwise use a temporary directory
+    output_dir = args.output_dir if args.output_dir else create_temp_directory()
+    if args.output_dir and not os.path.exists(args.output_dir):
+        os.makedirs(args.output_dir)
+    
+    print(f"Search query: {query}")
+    print(f"Search URL: {search_url}")
+    print(f"Will summarize the first {args.num_results} results.")
+    print(f"Screenshots will be saved to: {output_dir}")
+    
+    # The actual search, screenshot capture, and summarization will be implemented in Phase 2 and beyond
+    print("Search and summarization functionality will be implemented in future phases.")
+
+
+if __name__ == "__main__":
+    main()
+EOF
+chmod +x search_tool.py
+
+
+# Content of commands/1741395755.sh:
+#!/bin/bash
+
+cat > search_utils.py << 'EOF'
+#!/usr/bin/env python3
+
+import os
+import sys
+import json
+import tempfile
+import requests
+from urllib.parse import quote
+
+
+def process_keywords(keywords):
+    """
+    Process a list of keywords for search.
+    
+    Args:
+        keywords (list): List of keyword strings
+        
+    Returns:
+        str: Processed keywords ready for search
+    """
+    # Remove any empty strings and join with spaces
+    processed = " ".join([k.strip() for k in keywords if k.strip()])
+    return processed
+
+
+def construct_search_url(query):
+    """
+    Construct a Google search URL from a query string.
+    
+    Args:
+        query (str): Search query string
+        
+    Returns:
+        str: Formatted Google search URL
+    """
+    encoded_query = quote(query)
+    return f"https://www.google.com/search?q={encoded_query}"
+
+
+def create_temp_directory():
+    """
+    Create a temporary directory to store screenshots.
+    
+    Returns:
+        str: Path to the temporary directory
+    """
+    temp_dir = tempfile.mkdtemp(prefix="search_tool_")
+    print(f"Created temporary directory for screenshots: {temp_dir}", file=sys.stderr)
+    return temp_dir
+
+
+def load_config(config_path="config.json"):
+    """
+    Load configuration from a JSON file.
+    
+    Args:
+        config_path (str): Path to the config file
+        
+    Returns:
+        dict: Configuration dictionary
+    """
+    if not os.path.exists(config_path):
+        # Check if example config exists and copy it
+        example_config = "example.config.json"
+        if os.path.exists(example_config):
+            print(f"Config file {config_path} not found. Please copy and modify {example_config}", file=sys.stderr)
+        else:
+            print(f"Config file {config_path} not found.", file=sys.stderr)
+        return {}
+        
+    try:
+        with open(config_path, 'r') as f:
+            return json.load(f)
+    except json.JSONDecodeError:
+        print(f"Error parsing config file {config_path}", file=sys.stderr)
+        return {}
+    except Exception as e:
+        print(f"Error loading config file: {e}", file=sys.stderr)
+        return {}
+
+
+def search_google_api(query, api_key, search_engine_id, num_results=5):
+    """
+    Search Google using the Custom Search JSON API.
+    
+    Args:
+        query (str): Search query string
+        api_key (str): Google API key
+        search_engine_id (str): Google Custom Search Engine ID
+        num_results (int): Number of results to return
+        
+    Returns:
+        list: List of dictionaries containing search results
+    """
+    base_url = "https://www.googleapis.com/customsearch/v1"
+    params = {
+        'q': query,
+        'key': api_key,
+        'cx': search_engine_id,
+        'num': min(num_results, 10)  # API allows max 10 results per request
+    }
+    
+    try:
+        response = requests.get(base_url, params=params)
+        response.raise_for_status()  # Raise exception for HTTP errors
+        
+        search_results = response.json()
+        
+        if 'items' not in search_results:
+            print("No search results found.", file=sys.stderr)
+            return []
+        
+        results = []
+        for item in search_results['items']:
+            result = {
+                'title': item.get('title', 'No title'),
+                'link': item.get('link', ''),
+                'snippet': item.get('snippet', 'No snippet available')
+            }
+            results.append(result)
+            
+        return results
+        
+    except requests.exceptions.RequestException as e:
+        print(f"Error making API request: {e}", file=sys.stderr)
+        return []
+    except json.JSONDecodeError:
+        print(f"Error parsing API response", file=sys.stderr)
+        return []
+    except Exception as e:
+        print(f"Unexpected error during search: {e}", file=sys.stderr)
+        return []
+EOF
+
+
+# Content of share/man/man1/isympy.1:
+'\" -*- coding: us-ascii -*-
+.if \n(.g .ds T< \\FC
+.if \n(.g .ds T> \\F[\n[.fam]]
+.de URL
+\\$2 \(la\\$1\(ra\\$3
+..
+.if \n(.g .mso www.tmac
+.TH isympy 1 2007-10-8 "" ""
+.SH NAME
+isympy \- interactive shell for SymPy
+.SH SYNOPSIS
+'nh
+.fi
+.ad l
+\fBisympy\fR \kx
+.if (\nx>(\n(.l/2)) .nr x (\n(.l/5)
+'in \n(.iu+\nxu
+[\fB-c\fR | \fB--console\fR] [\fB-p\fR ENCODING | \fB--pretty\fR ENCODING] [\fB-t\fR TYPE | \fB--types\fR TYPE] [\fB-o\fR ORDER | \fB--order\fR ORDER] [\fB-q\fR | \fB--quiet\fR] [\fB-d\fR | \fB--doctest\fR] [\fB-C\fR | \fB--no-cache\fR] [\fB-a\fR | \fB--auto\fR] [\fB-D\fR | \fB--debug\fR] [
+-- | PYTHONOPTIONS]
+'in \n(.iu-\nxu
+.ad b
+'hy
+'nh
+.fi
+.ad l
+\fBisympy\fR \kx
+.if (\nx>(\n(.l/2)) .nr x (\n(.l/5)
+'in \n(.iu+\nxu
+[
+{\fB-h\fR | \fB--help\fR}
+|
+{\fB-v\fR | \fB--version\fR}
+]
+'in \n(.iu-\nxu
+.ad b
+'hy
+.SH DESCRIPTION
+isympy is a Python shell for SymPy. It is just a normal python shell
+(ipython shell if you have the ipython package installed) that executes
+the following commands so that you don't have to:
+.PP
+.nf
+\*(T<
+>>> from __future__ import division
+>>> from sympy import *
+>>> x, y, z = symbols("x,y,z")
+>>> k, m, n = symbols("k,m,n", integer=True)
+    \*(T>
+.fi
+.PP
+So starting isympy is equivalent to starting python (or ipython) and
+executing the above commands by hand. It is intended for easy and quick
+experimentation with SymPy. For more complicated programs, it is recommended
+to write a script and import things explicitly (using the "from sympy
+import sin, log, Symbol, ..." idiom).
+.SH OPTIONS
+.TP
+\*(T<\fB\-c \fR\*(T>\fISHELL\fR, \*(T<\fB\-\-console=\fR\*(T>\fISHELL\fR
+Use the specified shell (python or ipython) as
+console backend instead of the default one (ipython
+if present or python otherwise).
+
+Example: isympy -c python
+
+\fISHELL\fR could be either
+\&'ipython' or 'python'
+.TP
+\*(T<\fB\-p \fR\*(T>\fIENCODING\fR, \*(T<\fB\-\-pretty=\fR\*(T>\fIENCODING\fR
+Setup pretty printing in SymPy. By default, the most pretty, unicode
+printing is enabled (if the terminal supports it). You can use less
+pretty ASCII printing instead or no pretty printing at all.
+
+Example: isympy -p no
+
+\fIENCODING\fR must be one of 'unicode',
+\&'ascii' or 'no'.
+.TP
+\*(T<\fB\-t \fR\*(T>\fITYPE\fR, \*(T<\fB\-\-types=\fR\*(T>\fITYPE\fR
+Setup the ground types for the polys. By default, gmpy ground types
+are used if gmpy2 or gmpy is installed, otherwise it falls back to python
+ground types, which are a little bit slower. You can manually
+choose python ground types even if gmpy is installed (e.g., for testing purposes).
+
+Note that sympy ground types are not supported, and should be used
+only for experimental purposes.
+
+Note that the gmpy1 ground type is primarily intended for testing; it the
+use of gmpy even if gmpy2 is available.
+
+This is the same as setting the environment variable
+SYMPY_GROUND_TYPES to the given ground type (e.g.,
+SYMPY_GROUND_TYPES='gmpy')
+
+The ground types can be determined interactively from the variable
+sympy.polys.domains.GROUND_TYPES inside the isympy shell itself.
+
+Example: isympy -t python
+
+\fITYPE\fR must be one of 'gmpy',
+\&'gmpy1' or 'python'.
+.TP
+\*(T<\fB\-o \fR\*(T>\fIORDER\fR, \*(T<\fB\-\-order=\fR\*(T>\fIORDER\fR
+Setup the ordering of terms for printing. The default is lex, which
+orders terms lexicographically (e.g., x**2 + x + 1). You can choose
+other orderings, such as rev-lex, which will use reverse
+lexicographic ordering (e.g., 1 + x + x**2).
+
+Note that for very large expressions, ORDER='none' may speed up
+printing considerably, with the tradeoff that the order of the terms
+in the printed expression will have no canonical order
+
+Example: isympy -o rev-lax
+
+\fIORDER\fR must be one of 'lex', 'rev-lex', 'grlex',
+\&'rev-grlex', 'grevlex', 'rev-grevlex', 'old', or 'none'.
+.TP
+\*(T<\fB\-q\fR\*(T>, \*(T<\fB\-\-quiet\fR\*(T>
+Print only Python's and SymPy's versions to stdout at startup, and nothing else.
+.TP
+\*(T<\fB\-d\fR\*(T>, \*(T<\fB\-\-doctest\fR\*(T>
+Use the same format that should be used for doctests. This is
+equivalent to '\fIisympy -c python -p no\fR'.
+.TP
+\*(T<\fB\-C\fR\*(T>, \*(T<\fB\-\-no\-cache\fR\*(T>
+Disable the caching mechanism. Disabling the cache may slow certain
+operations down considerably. This is useful for testing the cache,
+or for benchmarking, as the cache can result in deceptive benchmark timings.
+
+This is the same as setting the environment variable SYMPY_USE_CACHE
+to 'no'.
+.TP
+\*(T<\fB\-a\fR\*(T>, \*(T<\fB\-\-auto\fR\*(T>
+Automatically create missing symbols. Normally, typing a name of a
+Symbol that has not been instantiated first would raise NameError,
+but with this option enabled, any undefined name will be
+automatically created as a Symbol. This only works in IPython 0.11.
+
+Note that this is intended only for interactive, calculator style
+usage. In a script that uses SymPy, Symbols should be instantiated
+at the top, so that it's clear what they are.
+
+This will not override any names that are already defined, which
+includes the single character letters represented by the mnemonic
+QCOSINE (see the "Gotchas and Pitfalls" document in the
+documentation). You can delete existing names by executing "del
+name" in the shell itself. You can see if a name is defined by typing
+"'name' in globals()".
+
+The Symbols that are created using this have default assumptions.
+If you want to place assumptions on symbols, you should create them
+using symbols() or var().
+
+Finally, this only works in the top level namespace. So, for
+example, if you define a function in isympy with an undefined
+Symbol, it will not work.
+.TP
+\*(T<\fB\-D\fR\*(T>, \*(T<\fB\-\-debug\fR\*(T>
+Enable debugging output. This is the same as setting the
+environment variable SYMPY_DEBUG to 'True'. The debug status is set
+in the variable SYMPY_DEBUG within isympy.
+.TP
+-- \fIPYTHONOPTIONS\fR
+These options will be passed on to \fIipython (1)\fR shell.
+Only supported when ipython is being used (standard python shell not supported).
+
+Two dashes (--) are required to separate \fIPYTHONOPTIONS\fR
+from the other isympy options.
+
+For example, to run iSymPy without startup banner and colors:
+
+isympy -q -c ipython -- --colors=NoColor
+.TP
+\*(T<\fB\-h\fR\*(T>, \*(T<\fB\-\-help\fR\*(T>
+Print help output and exit.
+.TP
+\*(T<\fB\-v\fR\*(T>, \*(T<\fB\-\-version\fR\*(T>
+Print isympy version information and exit.
+.SH FILES
+.TP
+\*(T<\fI${HOME}/.sympy\-history\fR\*(T>
+Saves the history of commands when using the python
+shell as backend.
+.SH BUGS
+The upstreams BTS can be found at \(lahttps://github.com/sympy/sympy/issues\(ra
+Please report all bugs that you find in there, this will help improve
+the overall quality of SymPy.
+.SH "SEE ALSO"
+\fBipython\fR(1), \fBpython\fR(1)
