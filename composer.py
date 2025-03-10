@@ -94,50 +94,17 @@ def generate():
                 'provider': 'openrouter'
             })
         elif provider == 'ollama':
-            # Process messages for Ollama format
-            ollama_messages = []
-            
-            # Handling images for Ollama
-            has_images = False
-            for msg in messages:
-                content = msg.get("content", "")
-                
-                # Check if content is a list (might contain images)
-                if isinstance(content, list):
-                    text_parts = []
-                    for part in content:
-                        if isinstance(part, dict):
-                            # Handle image_url type content
-                            if part.get("type") == "image_url":
-                                has_images = True
-                                # For now, we'll skip images as Ollama has limited multimodal support
-                                # Future: implement image handling for supported models
-                                text_parts.append("[Image content not supported in this Ollama model]")
-                            # Add other content types as text
-                            elif "text" in part:
-                                text_parts.append(part["text"])
-                        elif isinstance(part, str):
-                            text_parts.append(part)
-                    ollama_messages.append({"role": msg["role"], "content": " ".join(text_parts)})
-                else:
-                    # Simple text message
-                    ollama_messages.append({"role": msg["role"], "content": content})
-            
-            # Warn if images were skipped
-            if has_images:
-                print("Warning: Images in messages were skipped for Ollama request")
-            
             # Prepare Ollama API request
             ollama_data = {
                 "model": model,
-                "messages": ollama_messages,
+                "messages": messages,
+                "stream": False,  # We want a single response
                 "options": {
                     "temperature": temperature,
                     "num_predict": max_tokens
                 }
             }
             
-            # Send request to Ollama API
             try:
                 ollama_response = requests.post(
                     f"{ollama_api_url}/api/chat",
@@ -159,7 +126,8 @@ def generate():
                         'success': False,
                         'error': f"Ollama API error: {ollama_response.status_code} - {ollama_response.text}"
                     }), 500
-            except Exception as e: return jsonify({
+            except Exception as e:
+                return jsonify({
                     'success': False,
                     'error': f"Error connecting to Ollama API: {str(e)}"
                 }), 500
@@ -168,7 +136,7 @@ def generate():
                 'success': False,
                 'error': f"Provider '{provider}' not available or no valid API keys found."
             }), 400
-            
+                    
     except Exception as e:
         return jsonify({
             'success': False,
@@ -187,7 +155,6 @@ def health_check():
     # Check if Ollama is available by making a simple request
     try:
         response = requests.get(f"{ollama_api_url}/api/tags")
-        print("ollama response", response)
         if response.status_code == 200:
             available_providers.append('ollama')
             # Get available models
