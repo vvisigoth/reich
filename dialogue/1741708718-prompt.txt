@@ -1,1 +1,0 @@
-I commented out the directory structure building portion of the context because it was returning the whole directory structure instead of just the portion in the include.txt. How can we fix this?
