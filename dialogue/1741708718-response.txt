@@ -1,0 +1,98 @@
+# Fixing Directory Structure in XML Context
+
+To fix the directory structure building to only show files matching your include patterns (rather than the entire directory), you can modify the `generate_directory_structure` function to filter based on the same inclusion patterns.
+
+Here's how to implement this:
+
+```python
+def generate_directory_structure(root_dir, inclusions):
+    """Generate directory structure filtered to only show included files/directories"""
+    if not inclusions:
+        return ""
+        
+    # First, get all matching files based on inclusions
+    matching_files = []
+    for pattern in inclusions:
+        matching_files.extend(glob.glob(pattern, recursive=True))
+    
+    # If no matching files, return empty string
+    if not matching_files:
+        return ""
+    
+    # Get unique directories containing matching files
+    matching_dirs = set()
+    for file_path in matching_files:
+        # Add all parent directories
+        path_parts = Path(file_path).parts
+        for i in range(1, len(path_parts)):
+            matching_dirs.add(os.path.join(*path_parts[:i]))
+    
+    # Create a filtered tree output
+    result = f"Project Directory Structure (Filtered):\n"
+    result += "./\n"
+    
+    # Sort directories for consistent output
+    sorted_dirs = sorted(matching_dirs)
+    
+    # Add directories with proper indentation
+    for directory in sorted_dirs:
+        depth = directory.count(os.sep) + 1
+        result += f"{' ' * (depth * 2)}├── {os.path.basename(directory)}/\n"
+    
+    # Add files with proper indentation
+    for file_path in sorted(matching_files):
+        if os.path.isfile(file_path):
+            depth = file_path.count(os.sep) + 1
+            result += f"{' ' * (depth * 2)}├── {os.path.basename(file_path)}\n"
+    
+    return result
+```
+
+Then update your `gather_context` function to pass the inclusions to `generate_directory_structure`:
+
+```python
+def gather_context(inclusions):
+    """Gather context based on inclusion patterns and format using XML"""
+    # Start with an XML root element
+    context = "<context>\n"
+    
+    # Add directory structure as an XML element, passing inclusions
+    dir_structure = generate_directory_structure('.', inclusions)
+    if dir_structure.strip():
+        context += "  <directory_structure>\n"
+        context += "    <![CDATA[\n"
+        context += dir_structure
+        context += "    ]]>\n"
+        context += "  </directory_structure>\n"
+    
+    # Process inclusions
+    context += "  <included_files>\n"
+    for pattern in inclusions:
+        matching_files = glob.glob(pattern, recursive=True)
+        for file in matching_files:
+            if os.path.isfile(file):
+                try:
+                    with open(file, 'r', errors="ignore") as f:
+                        file_content = f.read()
+                        context += f"    <file path=\"{file}\">\n"
+                        context += "      <![CDATA[\n"
+                        context += file_content
+                        context += "\n      ]]>\n"
+                        context += "    </file>\n"
+                except Exception as e:
+                    context += f"    <error file=\"{file}\">{str(e)}</error>\n"
+    
+    context += "  </included_files>\n"
+    context += "</context>"
+    
+    return context
+```
+
+This implementation:
+
+1. Creates a filtered directory structure showing only the directories and files that match your inclusion patterns
+2. Properly organizes the structure with indentation to show the hierarchy
+3. Includes both directories containing matching files and the files themselves
+4. Wraps everything in the XML structure so the LLM can better understand the context
+
+Now you can uncomment the directory structure portion in your code, and it will only show the relevant directories and files that match your include.txt patterns, rather than the entire project structure.
