@@ -26,6 +26,17 @@ INCLUDE_FILE = "include.txt"  # Changed from EXCLUDE_FILE to INCLUDE_FILE
 GENERATED_DIR = "generated/"
 SERVER_URL = "http://localhost:5555/api"  # Default server URL
 
+def set_root_directory(root_dir):
+    """Set the root directory and update all path constants"""
+    global ROOT_DIR, DIALOGUE_DIR, PREAMBLE_FILE, EXCLUDE_FILE, INCLUDE_FILE, GENERATED_DIR
+
+    ROOT_DIR = os.path.abspath(root_dir)
+    DIALOGUE_DIR = os.path.join(ROOT_DIR, "dialogue/")
+    PREAMBLE_FILE = os.path.join(ROOT_DIR, "preamble.txt")
+    EXCLUDE_FILE = os.path.join(ROOT_DIR, "exclude.txt")
+    INCLUDE_FILE = os.path.join(ROOT_DIR, "include.txt")
+    GENERATED_DIR = os.path.join(ROOT_DIR, "generated/")
+
 def get_epoch_time():
     return str(int(time.time()))
 
@@ -79,8 +90,10 @@ def save_prompt(prompt_text, final_context):
     return epoch_time, prompt_file
 
 def load_preamble():
-    with open(PREAMBLE_FILE, 'r') as f:
-        return f.read().strip()
+    if os.path.exists(PREAMBLE_FILE):
+        with open(PREAMBLE_FILE, 'r') as f:
+            return f.read().strip()
+    return ""
 
 def load_inclusions():
     """Load list of files/directories to include in context"""
@@ -93,16 +106,16 @@ def generate_directory_structure(root_dir, inclusions):
     """Generate directory structure filtered to only show included files/directories"""
     if not inclusions:
         return ""
-        
+
     # First, get all matching files based on inclusions
     matching_files = []
     for pattern in inclusions:
         matching_files.extend(glob.glob(pattern, recursive=True))
-    
+
     # If no matching files, return empty string
     if not matching_files:
         return ""
-    
+
     # Get unique directories containing matching files
     matching_dirs = set()
     for file_path in matching_files:
@@ -110,25 +123,25 @@ def generate_directory_structure(root_dir, inclusions):
         path_parts = Path(file_path).parts
         for i in range(1, len(path_parts)):
             matching_dirs.add(os.path.join(*path_parts[:i]))
-    
+
     # Create a filtered tree output
     result = f"Project Directory Structure (Filtered):\n"
     result += "./\n"
-    
+
     # Sort directories for consistent output
     sorted_dirs = sorted(matching_dirs)
-    
+
     # Add directories with proper indentation
     for directory in sorted_dirs:
         depth = directory.count(os.sep) + 1
         result += f"{' ' * (depth * 2)}├── {os.path.basename(directory)}/\n"
-    
+
     # Add files with proper indentation
     for file_path in sorted(matching_files):
         if os.path.isfile(file_path):
             depth = file_path.count(os.sep) + 1
             result += f"{' ' * (depth * 2)}├── {os.path.basename(file_path)}\n"
-    
+
     return result
 
 def gather_context(inclusions):
@@ -180,10 +193,10 @@ def manage_message_history():
     # Create history directory if it doesn't exist
     history_dir = "history/"
     Path(history_dir).mkdir(exist_ok=True)
-    
+
     # Get all files in dialogue directory
     all_files = glob.glob(os.path.join(DIALOGUE_DIR, "*.txt"))
-    
+
     # Group files by their timestamp prefix
     file_groups = {}
     for file_path in all_files:
@@ -195,20 +208,20 @@ def manage_message_history():
             if timestamp not in file_groups:
                 file_groups[timestamp] = []
             file_groups[timestamp].append(file_path)
-    
+
     # Sort timestamps in ascending order (oldest first)
     sorted_timestamps = sorted(file_groups.keys())
-    
+
     # If we have more than 5 exchanges, move the oldest ones to history
     if len(sorted_timestamps) > 5:
         # Calculate how many timestamps to move
         timestamps_to_move = sorted_timestamps[:-5]  # All but the 5 most recent
-        
+
         for timestamp in timestamps_to_move:
             for file_path in file_groups[timestamp]:
                 # Get the destination path in the history directory
                 dest_path = os.path.join(history_dir, os.path.basename(file_path))
-                
+
                 # Move the file
                 try:
                     os.rename(file_path, dest_path)
@@ -331,8 +344,12 @@ def main():
     parser.add_argument("-s", "--server", default=SERVER_URL, help=f"Server URL (default: {SERVER_URL})")
     parser.add_argument("-p", "--provider", default="openrouter", choices=["ollama", "openai", "openrouter", "anthropic"])
     parser.add_argument("-m", "--model", default="anthropic/claude-3.7-sonnet", help="Model to use")
+    parser.add_argument("-r", "--root", default=".", help="Root directory of the project (default: current directory)")
 
     args = parser.parse_args()
+
+    # Set the root directory
+    set_root_directory(args.root)
 
     # Process user input
     if args.file:
