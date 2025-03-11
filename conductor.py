@@ -63,14 +63,15 @@ def process_image(image_path, max_height=7999):
 def save_prompt(prompt_text, final_context):
     epoch_time = get_epoch_time()
     prompt_file = os.path.join(DIALOGUE_DIR, f"{epoch_time}-prompt.txt")
-    context_file = os.path.join(DIALOGUE_DIR, f"{epoch_time}-context.txt")
+    # UNCOMMENT TO DEBUG
+    #context_file = os.path.join(DIALOGUE_DIR, f"{epoch_time}-context.txt")
 
     try:
         with open(prompt_file, 'w') as f:
             f.write(prompt_text)
 
-        with open(context_file, 'w') as f:
-            f.write(final_context)
+        #with open(context_file, 'w') as f:
+        #    f.write(final_context)
 
     except Exception as e:
         print(f"Error saving files: {e}")
@@ -88,14 +89,47 @@ def load_inclusions():
             return [line.strip() for line in f if line.strip()]
     return []
 
-def generate_directory_structure(root_dir):
-    """Generate directory structure without filtering"""
-    command = f"tree {root_dir} --prune"
-
-    # Execute the tree command
-    result = subprocess.run(command, shell=True, capture_output=True, text=True)
-
-    return result.stdout
+def generate_directory_structure(root_dir, inclusions):
+    """Generate directory structure filtered to only show included files/directories"""
+    if not inclusions:
+        return ""
+        
+    # First, get all matching files based on inclusions
+    matching_files = []
+    for pattern in inclusions:
+        matching_files.extend(glob.glob(pattern, recursive=True))
+    
+    # If no matching files, return empty string
+    if not matching_files:
+        return ""
+    
+    # Get unique directories containing matching files
+    matching_dirs = set()
+    for file_path in matching_files:
+        # Add all parent directories
+        path_parts = Path(file_path).parts
+        for i in range(1, len(path_parts)):
+            matching_dirs.add(os.path.join(*path_parts[:i]))
+    
+    # Create a filtered tree output
+    result = f"Project Directory Structure (Filtered):\n"
+    result += "./\n"
+    
+    # Sort directories for consistent output
+    sorted_dirs = sorted(matching_dirs)
+    
+    # Add directories with proper indentation
+    for directory in sorted_dirs:
+        depth = directory.count(os.sep) + 1
+        result += f"{' ' * (depth * 2)}├── {os.path.basename(directory)}/\n"
+    
+    # Add files with proper indentation
+    for file_path in sorted(matching_files):
+        if os.path.isfile(file_path):
+            depth = file_path.count(os.sep) + 1
+            result += f"{' ' * (depth * 2)}├── {os.path.basename(file_path)}\n"
+    
+    return result
 
 def gather_context(inclusions):
     """Gather context based on inclusion patterns and format using XML"""
@@ -103,8 +137,7 @@ def gather_context(inclusions):
     context = "<context>\n"
 
     # Add directory structure as an XML element
-    #dir_structure = generate_directory_structure('.')
-    dir_structure = ""
+    dir_structure = generate_directory_structure('.', inclusions)
     if dir_structure.strip():
         context += "  <directory_structure>\n"
         context += "    <![CDATA[\n"
@@ -138,6 +171,50 @@ def gather_context(inclusions):
     context += "</context>"
 
     return context
+
+def manage_message_history():
+    """
+    Maintains only the 5 most recent prompt/response pairs in the dialogue directory.
+    Moves older messages to the history directory.
+    """
+    # Create history directory if it doesn't exist
+    history_dir = "history/"
+    Path(history_dir).mkdir(exist_ok=True)
+    
+    # Get all files in dialogue directory
+    all_files = glob.glob(os.path.join(DIALOGUE_DIR, "*.txt"))
+    
+    # Group files by their timestamp prefix
+    file_groups = {}
+    for file_path in all_files:
+        filename = os.path.basename(file_path)
+        # Extract the timestamp from the filename (format: timestamp-type.txt)
+        parts = filename.split('-', 1)
+        if len(parts) == 2:
+            timestamp = parts[0]
+            if timestamp not in file_groups:
+                file_groups[timestamp] = []
+            file_groups[timestamp].append(file_path)
+    
+    # Sort timestamps in ascending order (oldest first)
+    sorted_timestamps = sorted(file_groups.keys())
+    
+    # If we have more than 5 exchanges, move the oldest ones to history
+    if len(sorted_timestamps) > 5:
+        # Calculate how many timestamps to move
+        timestamps_to_move = sorted_timestamps[:-5]  # All but the 5 most recent
+        
+        for timestamp in timestamps_to_move:
+            for file_path in file_groups[timestamp]:
+                # Get the destination path in the history directory
+                dest_path = os.path.join(history_dir, os.path.basename(file_path))
+                
+                # Move the file
+                try:
+                    os.rename(file_path, dest_path)
+                    print(f"Moved {file_path} to {dest_path}")
+                except Exception as e:
+                    print(f"Error moving file {file_path}: {e}")
 
 def gather_message_history():
     files = sorted(glob.glob(os.path.join(DIALOGUE_DIR, "*.txt")), key=os.path.getmtime)
@@ -300,6 +377,9 @@ def main():
         with open(response_file, 'w') as f:
             f.write(response_text)
 
+        # Manage message history - keep only the 5 most recent exchanges
+        manage_message_history()
+
         # Extract and save code blocks if present
         code_blocks = re.findall(r'```(.*?)```', response_text, re.DOTALL)
         if code_blocks:
@@ -325,10 +405,6 @@ def main():
         print("RESPONSE:")
         print("="*50)
         print(response_text)
-
-        # Update conversation summary
-        if 'diarize' in sys.modules:
-            diarize.summarize_conversation()
 
     except Exception as e:
         print(f"Error in processing: {e}")
