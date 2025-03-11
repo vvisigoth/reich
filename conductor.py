@@ -76,7 +76,7 @@ def save_prompt(prompt_text, final_context):
     except Exception as e:
         print(f"Error saving files: {e}")
 
-    return epoch_time, prompt_file, context_file
+    return epoch_time, prompt_file
 
 def load_preamble():
     with open(PREAMBLE_FILE, 'r') as f:
@@ -359,7 +359,7 @@ def main():
 
     # Prepare final prompt with context
     final_prompt = f"{preamble}\n\n{user_prompt}\n\n{context}"
-    epoch_time, prompt_file, context_file = save_prompt(user_prompt, final_context=final_prompt)
+    epoch_time, prompt_file = save_prompt(user_prompt, final_context=final_prompt)
 
     try:
         # Send request to AI server
