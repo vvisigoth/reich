@@ -43,7 +43,7 @@ def generate():
     max_tokens = data.get('max_tokens', 4000)
     temperature = data.get('temperature', 0.7)
     provider = data.get('provider', 'openrouter')  # Default to OpenAI if not specified
-    
+
     try:
         if provider == 'openai' and openai_client:
             response = openai_client.chat.completions.create(
@@ -58,7 +58,7 @@ def generate():
                 'model': model,
                 'provider': 'openai'
             })
-            
+
         elif provider == 'anthropic' and anthropic_client:
             # Convert OpenAI message format to Anthropic format
             anthropic_messages = []
@@ -67,13 +67,13 @@ def generate():
                     "role": msg["role"],
                     "content": msg["content"]
                 })
-            
+
             response = anthropic_client.messages.create(
                 model="claude-3-7-sonnet-20250219" if model == "default" else model,
                 max_tokens=max_tokens,
                 messages=anthropic_messages
             )
-            
+
             return jsonify({
                 'success': True,
                 'content': response.content[0].text.strip(),
@@ -87,6 +87,7 @@ def generate():
                 max_tokens=max_tokens,
                 temperature=temperature
             )
+            print("response", response)
             return jsonify({
                 'success': True,
                 'content': response.choices[0].message.content.strip(),
@@ -104,14 +105,14 @@ def generate():
                     "num_predict": max_tokens
                 }
             }
-            
+
             try:
                 ollama_response = requests.post(
                     f"{ollama_api_url}/api/chat",
                     json=ollama_data,
                     headers={"Content-Type": "application/json"}
                 )
-                
+
                 # Handle response
                 if ollama_response.status_code == 200:
                     response_data = ollama_response.json()
@@ -136,7 +137,7 @@ def generate():
                 'success': False,
                 'error': f"Provider '{provider}' not available or no valid API keys found."
             }), 400
-                    
+
     except Exception as e:
         return jsonify({
             'success': False,
