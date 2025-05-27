@@ -1,6 +1,6 @@
 # Reich - AI Assistant CLI Tool
 
-Reich is a command-line interface tool for interacting with large language models (LLMs), currently supporting both OpenAI's GPT models and Anthropic's Claude models. It allows you to send prompts, include context from your current directory, and save the conversation history.
+Reich (as in Steve Reich) is a command-line interface tool for interacting with large language models (LLMs), currently supporting both OpenAI's GPT models and Anthropic's Claude models. It allows you to send prompts, include context from your current directory, and save the conversation history.
 
 ## Features
 
